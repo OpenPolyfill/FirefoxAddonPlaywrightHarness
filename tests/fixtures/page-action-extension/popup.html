@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8" />
+<body>
+  <script>
+    browser.tabs.query({ active: true, currentWindow: true }).then(([tab]) => {
+      document.body.dataset.activeTab = tab?.url || ''
+    })
+  </script>
+</body>

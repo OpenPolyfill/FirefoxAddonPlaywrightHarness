@@ -1,0 +1,12 @@
+{
+  "manifest_version": 2,
+  "name": "Harness pageAction fixture",
+  "version": "1.0",
+  "page_action": {
+    "default_title": "Harness",
+    "default_popup": "popup.html",
+    "show_matches": ["<all_urls>"]
+  },
+  "background": { "scripts": ["background.js"] },
+  "permissions": ["tabs"]
+}

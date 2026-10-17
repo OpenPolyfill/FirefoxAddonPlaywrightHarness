@@ -1,0 +1,8 @@
+{
+  "manifest_version": 2,
+  "name": "Harness browserAction fixture",
+  "version": "1.0",
+  "browser_action": { "default_title": "Harness", "default_popup": "popup.html" },
+  "background": { "scripts": ["background.js"] },
+  "permissions": ["tabs"]
+}

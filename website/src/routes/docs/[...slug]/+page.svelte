@@ -1,0 +1,96 @@
+<script lang="ts">
+	import type { PageData } from './$types';
+	import { formatLastUpdated } from '#lib/core/content.js';
+	import { SITE_URL, getEditUrl } from '#lib/site.js';
+	import PageActions from '#lib/themes/docs/PageActions.svelte';
+	import PageIcon from '#lib/icons/PageIcon.svelte';
+
+	let { data }: { data: PageData } = $props();
+	const Content = $derived(data.Content);
+</script>
+
+<svelte:head>
+	<title>{data.entry.title} | Firefox Addon Playwright Harness</title>
+	{#if data.entry.description}
+		<meta name="description" content={data.entry.description} />
+	{/if}
+
+	<meta property="og:type" content="article" />
+	<meta property="og:title" content={data.entry.title} />
+	{#if data.entry.description}
+		<meta property="og:description" content={data.entry.description} />
+	{/if}
+	{#if SITE_URL}
+		<meta property="og:url" content="{SITE_URL}{data.entry.path}" />
+	{/if}
+</svelte:head>
+
+<article>
+	<header>
+		<h1><PageIcon name={data.entry.icon} class="title-icon" />{data.entry.title}</h1>
+		{#if data.entry.description}
+			<p>{data.entry.description}</p>
+		{/if}
+		<!-- Kept out of the search index, so excerpts show the page, not "3 min read · Copy Markdown". -->
+		<div data-pagefind-ignore>
+			<p class="meta">{data.entry.readingTimeMinutes} min read · {data.entry.wordCount} words</p>
+			<PageActions slug={data.entry.slug} editHref={getEditUrl(data.entry.sourcePath)} />
+		</div>
+	</header>
+
+	{#if Content}
+		<Content />
+	{:else}
+		<p>Unable to render this document component.</p>
+	{/if}
+
+	{#if data.entry.lastModified}
+		<footer class="doc-colophon">
+			Last updated on {formatLastUpdated(data.entry.lastModified)}
+		</footer>
+	{/if}
+</article>
+
+<style>
+	header {
+		margin-bottom: 1.75rem;
+	}
+
+	h1 {
+		margin: 0;
+		display: flex;
+		align-items: center;
+		font-size: clamp(1.9rem, 3.4vw, 2.5rem);
+		font-weight: 700;
+		letter-spacing: -0.02em;
+		line-height: 1.15;
+	}
+
+	h1 :global(.title-icon) {
+		flex-shrink: 0;
+		width: 0.85em;
+		height: 0.85em;
+		margin-right: 0.4rem;
+		color: var(--accent-strong);
+	}
+
+	header p {
+		margin: 0.6rem 0 0;
+		color: var(--text-soft);
+		font-size: 1.05rem;
+	}
+
+	.meta {
+		font-size: 0.82rem;
+		color: var(--text-dim);
+	}
+
+	.doc-colophon {
+		margin-top: 3rem;
+		padding-top: 1rem;
+		border-top: 1px solid var(--line);
+		font-size: 0.8rem;
+		color: var(--text-dim);
+		text-align: right;
+	}
+</style>

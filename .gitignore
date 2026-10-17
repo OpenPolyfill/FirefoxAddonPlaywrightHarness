@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tsbuildinfo
+website/node_modules/
+website/.svelte-kit/
+website/build/
+website/content/

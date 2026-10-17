@@ -1,0 +1,77 @@
+{
+  "name": "@openpolyfill/firefox-addon-playwright-harness",
+  "version": "0.1.0",
+  "description": "Standalone Playwright Firefox WebExtension harness backed by Firefox RDP",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "license": "MPL-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./fixtures": {
+      "types": "./dist/fixtures.d.ts",
+      "import": "./dist/fixtures.js"
+    },
+    "./globalSetup": {
+      "types": "./dist/globalSetup.d.ts",
+      "import": "./dist/globalSetup.js"
+    },
+    "./patch": {
+      "types": "./dist/patch.d.ts",
+      "import": "./dist/patch.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "prettier . --write",
+    "format:check": "prettier . --check",
+    "format:docs": "prettier README.md 'docs/**/*.md' --write",
+    "format:js": "prettier 'scripts/**/*.mjs' --write",
+    "format:ts": "prettier 'src/**/*.ts' 'tests/**/*.ts' --write",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "test": "npm run build && node --test dist-tests/**/*.test.js",
+    "verify": "npm run format:check && npm run lint && npm run typecheck",
+    "pack:check": "npm run build && npm pack --dry-run",
+    "docs:setup": "node scripts/docs-svocs.mjs setup",
+    "docs:prepare": "node scripts/docs-svocs.mjs prepare",
+    "docs:dev": "node scripts/docs-svocs.mjs dev",
+    "docs:build": "node scripts/docs-svocs.mjs build",
+    "docs:preview": "node scripts/docs-svocs.mjs preview",
+    "docs:check": "node scripts/docs-svocs.mjs check"
+  },
+  "dependencies": {
+    "@openpolyfill/firefox-rdp": "^0.1.0",
+    "jszip": "^3.10.1"
+  },
+  "peerDependencies": {
+    "@playwright/test": ">=1.40"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.52.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^10.8.0",
+    "eslint-plugin-jsdoc": "^63.3.2",
+    "prettier": "^3.9.6",
+    "typedoc": "^0.28.0",
+    "typedoc-plugin-markdown": "^4.6.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.65.0"
+  }
+}
