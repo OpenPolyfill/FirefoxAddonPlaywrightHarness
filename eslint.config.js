@@ -13,18 +13,6 @@ const nodeGlobals = {
   setTimeout: 'readonly'
 }
 
-const requireJsdoc = [
-  'error',
-  {
-    require: {
-      FunctionDeclaration: true,
-      MethodDefinition: true,
-      ClassDeclaration: true,
-      ArrowFunctionExpression: false
-    }
-  }
-]
-
 export default tseslint.config(
   {
     ignores: ['dist/**', 'website/**', 'src/generated/**', 'docs/content/api/reference/**']
@@ -38,11 +26,6 @@ export default tseslint.config(
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }
       ],
-      'jsdoc/require-jsdoc': ['warn', requireJsdoc[1]],
-      'jsdoc/require-param': 'warn',
-      'jsdoc/require-returns': 'warn',
-      'jsdoc/require-param-type': 'off',
-      'jsdoc/require-returns-type': 'off',
       'jsdoc/check-types': 'warn',
       'jsdoc/valid-types': 'warn'
     }
@@ -68,11 +51,6 @@ export default tseslint.config(
     },
     rules: {
       'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
-      'jsdoc/require-jsdoc': ['warn', requireJsdoc[1]],
-      'jsdoc/require-param': 'warn',
-      'jsdoc/require-returns': 'warn',
-      'jsdoc/require-param-type': 'off',
-      'jsdoc/require-returns-type': 'off',
       'jsdoc/check-types': 'warn',
       'jsdoc/valid-types': 'warn'
     }
