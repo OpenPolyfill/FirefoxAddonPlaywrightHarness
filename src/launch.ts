@@ -6,7 +6,7 @@ import { acquireRdpPort } from './port.js'
 import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
 import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
 import { closedShadowRootBridgeSource } from './closed-shadow-roots.js'
-import { stageExtensionContentScripts } from './extension-package.js'
+import { createClosedShadowBridgeExtension } from './extension-package.js'
 import { FirefoxRdpSession, RdpEvaluation } from './rdp.js'
 import { RdpIsolatedNamespace } from './isolated.js'
 import { RdpPopup } from './popup.js'
@@ -63,13 +63,13 @@ export async function launchFirefoxExtension(
       userDataDir,
       launchOptions(config, releasePort.port)
     )
-    const installPath = await stageExtensionContentScripts(
-      extensionPath,
+    const bridgeExtensionPath = await createClosedShadowBridgeExtension(
       userDataDir,
       closedShadowRootBridgeSource()
     )
     session = await FirefoxRdpSession.connect(releasePort.port)
-    const installed = await session.installExtension(installPath)
+    await session.installTemporaryAddon(bridgeExtensionPath)
+    const installed = await session.installExtension(extensionPath)
     extension = new FirefoxExtensionHandle(
       session,
       installed.id,
