@@ -13,7 +13,7 @@ await popup.waitForSelector('[data-ready]')
 expect(await popup.evaluate(() => document.body.dataset.ready)).toBe('true')
 ```
 
-The harness invokes the action API through the background context and waits for the extension popup target. It works in headless Firefox without navigating the Playwright page to the popup URL.
+The harness triggers both action types through privileged Firefox chrome code, independently of the extension background context, then waits for the extension popup target. It works in headless Firefox without navigating the Playwright page to the popup URL.
 
 ## Page actions
 

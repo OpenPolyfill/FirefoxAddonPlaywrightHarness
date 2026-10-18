@@ -6,7 +6,7 @@ A TypeScript Playwright harness for testing Firefox WebExtensions. It launches F
 
 ### Background-less extensions
 
-Extensions without a background page or worker install normally; `extension.background` is `undefined`. Popup/action helpers that require a background context remain unavailable for those extensions.
+Extensions without a background page or worker install normally; `extension.background` is `undefined`. Browser and page action popups are triggered through privileged Firefox chrome code and do not require a background context.
 
 ## Features
 

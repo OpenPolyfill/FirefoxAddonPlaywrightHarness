@@ -118,9 +118,6 @@ class FirefoxExtensionHandle implements FirefoxExtension {
 
   async activateAction(page: Page, kind: ActionKind = 'browserAction'): Promise<RdpPopup> {
     if (this.closed) throw new Error('Extension harness is closed')
-    const background = this.background
-    if (kind !== 'pageAction' && !background)
-      throw new Error('Browser action activation requires an extension background context')
     await page.bringToFront()
     const popupTarget = this.session.waitForTarget((target) => {
       const url = typeof target.form?.url === 'string' ? target.form.url : ''
@@ -131,13 +128,13 @@ class FirefoxExtensionHandle implements FirefoxExtension {
       )
     }, 15_000)
     popupTarget.catch(() => undefined)
+    const chrome = this.session.chromeTarget
+    if (!chrome)
+      throw new Error(
+        'Firefox RDP did not expose the parent chrome target for extension action activation'
+      )
+    const chromeEvaluation = new RdpEvaluation(this.session.rdp, chrome.console())
     if (kind === 'pageAction') {
-      const chrome = this.session.chromeTarget
-      if (!chrome)
-        throw new Error(
-          'Firefox RDP did not expose the parent chrome target for pageAction activation'
-        )
-      const chromeEvaluation = new RdpEvaluation(this.session.rdp, chrome.console())
       await chromeEvaluation.evaluate(`(async () => {
         const action = PageActions.actions.find(action => action.extensionID === ${JSON.stringify(this.id)})
         if (!action) throw new Error('Firefox pageAction is not registered in the chrome action list')
@@ -146,15 +143,17 @@ class FirefoxExtensionHandle implements FirefoxExtension {
           node = document.getElementById('pageAction-urlbar-' + action.id)
           if (!node) await new Promise(resolve => setTimeout(resolve, 25))
         }
-        if (!node) throw new Error('Firefox pageAction has no active-tab URL-bar control: ' + JSON.stringify({ actionId: action.id, controls: [...document.querySelectorAll('[id^="pageAction-urlbar-"]')].map(control => control.id), page: location.href }))
+        if (!node) throw new Error('Firefox pageAction has no active-tab URL-bar control')
         BrowserPageActions.doCommandForAction(action, { button: 0, modifiers: [], target: node }, node)
       })()`)
     } else {
-      await background!.evaluate(`(async () => {
-        const api = globalThis.browser?.browserAction ?? globalThis.browser?.action
-        if (!api || typeof api.openPopup !== 'function') throw new Error('Firefox browserAction.openPopup() is unavailable')
-        await api.openPopup()
-        return true
+      await chromeEvaluation.evaluate(`(async () => {
+        const { ExtensionParent } = ChromeUtils.importESModule('resource://gre/modules/ExtensionParent.sys.mjs')
+        const extension = ExtensionParent.GlobalManager.extensionMap.get(${JSON.stringify(this.id)})
+        if (!extension) throw new Error('Firefox extension is not registered')
+        const action = ExtensionParent.apiManager.global.browserActionFor?.(extension)
+        if (!action) throw new Error('Firefox browserAction is not registered')
+        action.triggerAction(window)
       })()`)
     }
     return new RdpPopup(this.session, await popupTarget)
