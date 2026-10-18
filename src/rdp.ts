@@ -1,3 +1,4 @@
+import JSZip from 'jszip'
 import { ActorFront, FirefoxRDP, TargetFront, type RDPResponse } from '@openpolyfill/firefox-rdp'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -206,7 +207,7 @@ export class RdpInspectedWindowEvaluation {
 export interface InstalledExtension {
   id: string
   addonActor: string
-  background: RdpEvaluation
+  background?: RdpEvaluation
   watcher: ActorFront
 }
 
@@ -299,16 +300,19 @@ export class FirefoxRdpSession {
     await watcher.call('watchTargets', { targetType: 'frame' })
     await watcher.call('watchTargets', { targetType: 'worker' })
     const manifest = await readManifest(path)
-    const background = await this.waitForTarget(
-      (target) => isBackgroundTarget(target, manifest, installed.id),
-      15_000
-    )
-    const targetConsole = background.console()
-    await targetConsole.call('startListeners', { listeners: ['evaluationResult'] })
+    const backgroundTarget = hasBackground(manifest)
+      ? await this.waitForTarget(
+          (target) => isBackgroundTarget(target, manifest, installed.id),
+          15_000
+        )
+      : undefined
+    const targetConsole = backgroundTarget?.console()
+    if (targetConsole)
+      await targetConsole.call('startListeners', { listeners: ['evaluationResult'] })
     return {
       id: installed.id,
       addonActor: installed.actor,
-      background: new RdpEvaluation(this.rdp, targetConsole),
+      background: targetConsole ? new RdpEvaluation(this.rdp, targetConsole) : undefined,
       watcher
     }
   }
@@ -389,7 +393,16 @@ export class FirefoxRdpSession {
 }
 
 async function readManifest(path: string): Promise<Record<string, unknown>> {
-  const raw = await readFile(join(path, 'manifest.json'), 'utf8')
+  let raw: string
+  try {
+    raw = await readFile(join(path, 'manifest.json'), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOTDIR') throw error
+    const archive = await JSZip.loadAsync(await readFile(path))
+    const manifest = archive.file('manifest.json')
+    if (!manifest) throw new Error(`Packed extension ${path} has no manifest.json`)
+    raw = await manifest.async('string')
+  }
   const parsed: unknown = JSON.parse(raw.replace(/^\uFEFF/, ''))
   const manifest = record(parsed)
   if (!manifest) throw new Error('Extension manifest must be a JSON object')
@@ -407,4 +420,13 @@ function isBackgroundTarget(
   if (url.includes('_generated_background_page')) return true
   const page = stringField(record(manifest.background), 'page')?.replace(/^\.\//, '')
   return page ? new URL(url).pathname.endsWith(`/${page}`) : false
+}
+
+function hasBackground(manifest: Record<string, unknown>): boolean {
+  const background = record(manifest.background)
+  return !!(
+    stringField(background, 'page') ||
+    stringField(background, 'service_worker') ||
+    (Array.isArray(background?.scripts) && background.scripts.length > 0)
+  )
 }

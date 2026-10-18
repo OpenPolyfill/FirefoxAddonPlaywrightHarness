@@ -92,7 +92,7 @@ export async function launchFirefoxExtension(
 }
 
 class FirefoxExtensionHandle implements FirefoxExtension {
-  readonly background: RdpEvaluation
+  readonly background?: RdpEvaluation
   readonly isolatedContexts: RdpIsolatedNamespace
   private isolatedPage?: FirefoxIsolatedPage
   private closed = false
@@ -100,7 +100,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     private readonly session: FirefoxRdpSession,
     readonly id: string,
     readonly installPath: string,
-    background: RdpEvaluation
+    background: RdpEvaluation | undefined
   ) {
     this.background = background
     this.isolatedContexts = new RdpIsolatedNamespace(session, id)
@@ -118,6 +118,9 @@ class FirefoxExtensionHandle implements FirefoxExtension {
 
   async activateAction(page: Page, kind: ActionKind = 'browserAction'): Promise<RdpPopup> {
     if (this.closed) throw new Error('Extension harness is closed')
+    const background = this.background
+    if (kind !== 'pageAction' && !background)
+      throw new Error('Browser action activation requires an extension background context')
     await page.bringToFront()
     const popupTarget = this.session.waitForTarget((target) => {
       const url = typeof target.form?.url === 'string' ? target.form.url : ''
@@ -147,7 +150,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
         BrowserPageActions.doCommandForAction(action, { button: 0, modifiers: [], target: node }, node)
       })()`)
     } else {
-      await this.background.evaluate(`(async () => {
+      await background!.evaluate(`(async () => {
         const api = globalThis.browser?.browserAction ?? globalThis.browser?.action
         if (!api || typeof api.openPopup !== 'function') throw new Error('Firefox browserAction.openPopup() is unavailable')
         await api.openPopup()

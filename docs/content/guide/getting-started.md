@@ -39,7 +39,7 @@ The harness starts Firefox itself with a temporary profile and a localhost-only 
 
 ## Create fixtures
 
-Pass the unpacked extension directory to `createFirefoxFixtures`:
+Pass the unpacked extension directory or packed XPI path to `createFirefoxFixtures`:
 
 ```ts
 import { test as baseTest, expect } from '@playwright/test'

@@ -1,11 +1,11 @@
 ---
 title: 'Firefox Addon Playwright Harness'
-description: 'Playwright fixtures for testing unpacked Firefox WebExtensions through Firefox RDP.'
+description: 'Playwright fixtures for testing Firefox WebExtensions through Firefox RDP.'
 ---
 
 **A Playwright harness for Firefox WebExtension integration tests.**
 
-Launch an isolated Firefox profile, install an unpacked extension, inspect the background context, evaluate page code, activate browser/page actions, and access the underlying Firefox RDP client from one fixture set.
+Launch an isolated Firefox profile, install an extension from an unpacked directory or packed XPI, inspect the background context, evaluate page code, activate browser/page actions, and access the underlying Firefox RDP client from one fixture set.
 
 ## Start here
 

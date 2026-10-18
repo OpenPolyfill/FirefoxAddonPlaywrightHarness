@@ -16,7 +16,7 @@ description: 'Use the page-bound extension helpers, explicit page contexts, and 
 
 The `extension` fixture exposes:
 
-- `id` and `installPath` — the installed extension identity and unpacked path.
+- `id` and `installPath` — the installed extension identity and source path (directory or XPI).
 - `background` — evaluator for the extension background context.
 - `isolated` — evaluator bound to the fixture's current `page`.
 - `isolatedContexts.get(page)` — evaluator factory for any explicit Playwright page.

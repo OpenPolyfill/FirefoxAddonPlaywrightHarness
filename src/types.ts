@@ -73,7 +73,7 @@ export interface FirefoxPopup {
 
 export interface FirefoxExtension {
   readonly id: string
-  readonly background: FirefoxBackground
+  readonly background?: FirefoxBackground
   readonly isolated: FirefoxIsolated
   readonly isolatedContexts: FirefoxIsolatedContexts
   installPath: string

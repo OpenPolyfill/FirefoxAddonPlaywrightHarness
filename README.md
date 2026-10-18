@@ -2,13 +2,17 @@
 
 ## About
 
-A TypeScript Playwright harness for testing Firefox WebExtensions. It launches Firefox with an isolated persistent profile, installs the extension through Firefox RDP, evaluates background and page code, and exposes popup/action helpers.
+A TypeScript Playwright harness for testing Firefox WebExtensions. It launches Firefox with an isolated persistent profile, installs the extension through Firefox RDP, evaluates background and page code when a background target exists, and exposes popup/action helpers.
+
+### Background-less extensions
+
+Extensions without a background page or worker install normally; `extension.background` is `undefined`. Popup/action helpers that require a background context remain unavailable for those extensions.
 
 ## Features
 
 - Isolated Firefox profile per harness instance.
-- Temporary unpacked extension installation through Firefox RDP.
-- Background evaluation through `extension.background`.
+- Temporary extension installation through Firefox RDP from an unpacked directory or packed XPI.
+- Optional background evaluation through `extension.background` for extensions with background pages or workers.
 - Page-bound isolated evaluation through `extension.isolated`.
 - Explicit page contexts through `extension.isolatedContexts.get(page)`.
 - Browser action and page action popup activation.
@@ -56,7 +60,7 @@ export default defineConfig({
 })
 ```
 
-Create the extension-aware fixtures by passing the unpacked extension directory to the factory:
+Create extension-aware fixtures by passing an unpacked extension directory or packed XPI path to the factory:
 
 ```ts
 // tests/fixtures.ts
@@ -132,7 +136,7 @@ const pagePopup = await extension.activateAction(page, 'pageAction')
 
 `createFirefoxFixtures` accepts the following configuration:
 
-- `extensionPath` — required path to the unpacked extension directory.
+- `extensionPath` — required path to an unpacked extension directory or packed XPI file.
 - `headless` — launch Firefox headlessly.
 - `firefoxUserPrefs` — additional Firefox preferences; harness-required preferences take precedence.
 - `args` — additional Firefox command-line arguments.
