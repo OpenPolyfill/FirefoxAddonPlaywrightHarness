@@ -94,7 +94,7 @@ export async function launchFirefoxExtension(
 class FirefoxExtensionHandle implements FirefoxExtension {
   readonly background?: RdpEvaluation
   readonly isolatedContexts: RdpIsolatedNamespace
-  private isolatedPage?: FirefoxIsolatedPage
+  private isolatedPage?: Page
   private closed = false
   constructor(
     private readonly session: FirefoxRdpSession,
@@ -109,11 +109,11 @@ class FirefoxExtensionHandle implements FirefoxExtension {
   get isolated(): FirefoxIsolatedPage {
     if (!this.isolatedPage)
       throw new Error('Firefox extension isolated evaluation is not bound to a Playwright page')
-    return this.isolatedPage
+    return this.isolatedContexts.get(this.isolatedPage)
   }
 
   bindIsolatedPage(page: Page): void {
-    this.isolatedPage = this.isolatedContexts.get(page)
+    this.isolatedPage = page
   }
 
   async activateAction(page: Page, kind: ActionKind = 'browserAction'): Promise<RdpPopup> {

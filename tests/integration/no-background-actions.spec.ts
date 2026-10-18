@@ -19,4 +19,3 @@ test('activates pageAction without a background context', async ({ page, extensi
   await popup.waitForSelector('[data-ready="true"]')
   expect(await popup.evaluate(() => document.body.textContent)).toContain('Action popup')
 })
-

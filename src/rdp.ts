@@ -319,13 +319,16 @@ export class FirefoxRdpSession {
 
   async inspectedWindowEvaluation(
     addonId: string,
-    pageUrl: string,
-    timeoutMs = 10_000
+    browsingContextID: number
   ): Promise<RdpInspectedWindowEvaluation> {
-    const target = await this.waitForTarget((candidate) => {
-      const url = stringField(candidate.form, 'url')
-      return url === pageUrl && !!stringField(candidate.form, 'webExtensionInspectedWindowActor')
-    }, timeoutMs)
+    const tab = (await this.rdp.root.listTabs()).find(
+      (candidate) => candidate.info.browsingContextID === browsingContextID
+    )
+    if (!tab)
+      throw new Error(`Firefox tab for browsingContextID ${browsingContextID} was not found`)
+    const target = await tab.getTarget()
+    if (target.form?.browsingContextID !== browsingContextID)
+      throw new Error('Firefox returned a target for the wrong browsing context')
     const actor = stringField(target.form, 'webExtensionInspectedWindowActor')
     if (!actor)
       throw new Error(

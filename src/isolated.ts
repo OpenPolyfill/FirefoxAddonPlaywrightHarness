@@ -8,17 +8,35 @@ export class RdpIsolatedNamespace implements FirefoxIsolatedContexts {
     private readonly addonId: string
   ) {}
 
+  private queue = Promise.resolve()
+
   get(page: Page): FirefoxIsolatedPage {
     return new RdpIsolatedPage(page, this)
   }
 
-  async evaluate<R>(
-    pageUrl: string,
+  evaluate<R>(
+    page: Page,
     pageFunction: string | ((...args: unknown[]) => R | Promise<R>),
     args: unknown[]
   ): Promise<R> {
-    const evaluation = await this.session.inspectedWindowEvaluation(this.addonId, pageUrl)
-    return evaluation.evaluate(pageUrl, pageFunction, args)
+    const run = this.queue.then(async () => {
+      await page.bringToFront()
+      const tab = (await this.session.rdp.root.listTabs()).find((candidate) => candidate.selected)
+      const browsingContextID = tab?.info.browsingContextID
+      if (typeof browsingContextID !== 'number')
+        throw new Error('Selected Firefox tab did not expose a browsingContextID')
+      const pageUrl = page.url()
+      const evaluation = await this.session.inspectedWindowEvaluation(
+        this.addonId,
+        browsingContextID
+      )
+      return evaluation.evaluate<R>(pageUrl, pageFunction, args)
+    })
+    this.queue = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
   }
 }
 
@@ -32,7 +50,7 @@ class RdpIsolatedPage implements FirefoxIsolatedPage {
     pageFunction: string | ((...args: unknown[]) => R | Promise<R>),
     ...args: unknown[]
   ): Promise<R> {
-    return this.namespace.evaluate(this.page.url(), pageFunction, args)
+    return this.namespace.evaluate(this.page, pageFunction, args)
   }
 
   async waitForFunction<R = unknown>(
