@@ -57,10 +57,14 @@ export async function assertClosedShadowSelectorPatched(): Promise<void> {
   const source = await readFile(coreBundlePath, 'utf8')
   if (
     !source.includes(
-      'const shadows = [];\\n    const rootShadow = root.shadowRoot || root.__playwrightClosedShadowRoot__ || root.wrappedJSObject?.__playwrightClosedShadowRoot__;'
+      'const shadows = [];\\n    const rootShadow = root.shadowRoot || window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(root);'
     ) ||
-    !source.includes('const rootShadow = root.shadowRoot || root.__playwrightClosedShadowRoot__') ||
-    !source.includes('element.wrappedJSObject?.__playwrightClosedShadowRoot__')
+    !source.includes(
+      'const rootShadow = root.shadowRoot || window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(root)'
+    ) ||
+    !source.includes(
+      'window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(element)'
+    )
   )
     throw new Error(
       `Playwright's selector bundle is not patched for closed shadow roots: ${coreBundlePath}. Reinstall dependencies to run the harness postinstall patch.`

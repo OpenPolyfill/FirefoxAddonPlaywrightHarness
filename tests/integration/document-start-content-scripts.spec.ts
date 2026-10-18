@@ -26,7 +26,7 @@ packedTest.afterAll(async () => {
   await rm(packedExtensionPath, { force: true })
 })
 
-async function assertDocumentStartCapture(page: Page): Promise<void> {
+async function assertDocumentStartBridge(page: Page): Promise<void> {
   await page.route('https://example.com/**', (route) =>
     route.fulfill({
       status: 200,
@@ -55,26 +55,16 @@ async function assertDocumentStartCapture(page: Page): Promise<void> {
     await expect(page.locator(host)).toHaveAttribute('data-content-script-ready-state', 'loading')
     await expect(page.locator(host)).toHaveAttribute('data-closed-root-created', 'true')
     await expect(page.locator(`${host} >> css=span`)).toHaveText(text)
+    await expect(page.getByText(text)).toBeVisible()
     await expect(page.getByRole('button', { name: action })).toBeVisible()
-    expect(
-      await page.locator(host).evaluate((element) => {
-        const hostElement = element as Element & {
-          __playwrightClosedShadowRoot__?: ShadowRoot
-        }
-        return {
-          nativeShadowRoot: hostElement.shadowRoot,
-          capturedRootText: hostElement.__playwrightClosedShadowRoot__?.textContent ?? null
-        }
-      })
-    ).toEqual({ nativeShadowRoot: null, capturedRootText: `${text}${action}` })
+    expect(await page.locator(host).evaluate((element) => element.shadowRoot)).toBeNull()
   }
 }
 
-test('MV3 document_start scripts capture closed roots in MAIN and ISOLATED worlds', async ({
-  page
-}) => assertDocumentStartCapture(page))
+test('MV3 document_start scripts expose roots from MAIN and ISOLATED worlds', async ({ page }) =>
+  assertDocumentStartBridge(page))
 
 packedTest(
-  'packed MV3 document_start captures closed roots in MAIN and ISOLATED worlds',
-  async ({ page }) => assertDocumentStartCapture(page)
+  'packed MV3 document_start exposes roots from MAIN and ISOLATED worlds',
+  async ({ page }) => assertDocumentStartBridge(page)
 )

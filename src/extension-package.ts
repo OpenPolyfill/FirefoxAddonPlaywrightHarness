@@ -31,27 +31,36 @@ export async function readExtensionManifest(path: string): Promise<ExtensionMani
 export async function stageExtensionContentScripts(
   extensionPath: string,
   stagingDirectory: string,
-  captureScript: string
+  bridgeScript: string
 ): Promise<string> {
   const manifest = await readExtensionManifest(extensionPath)
   const contentScripts = manifest.content_scripts
-  if (!Array.isArray(contentScripts) || contentScripts.length === 0) return extensionPath
-
-  const entries: Array<{ manifest: Record<string, unknown>; scripts: string[] }> = []
-  for (const contentScript of contentScripts) {
+  if (contentScripts !== undefined && !Array.isArray(contentScripts)) {
+    throw new Error('Extension manifest content_scripts must be an array')
+  }
+  const entries = (contentScripts ?? []) as unknown[]
+  for (const contentScript of entries) {
     const entry = record(contentScript)
     if (!entry) throw new Error('Extension manifest content_scripts entries must be objects')
     const scripts = entry.js
-    if (scripts === undefined) continue
-    if (!Array.isArray(scripts) || !scripts.every((file) => typeof file === 'string')) {
+    if (
+      scripts !== undefined &&
+      (!Array.isArray(scripts) || !scripts.every((file) => typeof file === 'string'))
+    ) {
       throw new Error('Extension manifest content_scripts js entries must be strings')
     }
-    if (scripts.length > 0) entries.push({ manifest: entry, scripts })
   }
-  if (entries.length === 0) return extensionPath
 
-  const bootstrapFilename = `__playwright_closed_shadow_${randomUUID()}.js`
-  for (const { manifest: entry, scripts } of entries) entry.js = [bootstrapFilename, ...scripts]
+  const bridgeFilename = `__playwright_closed_shadow_${randomUUID()}.js`
+  const bridgeEntry: Record<string, unknown> = {
+    matches: ['<all_urls>'],
+    js: [bridgeFilename],
+    run_at: 'document_start',
+    all_frames: true,
+    match_about_blank: true
+  }
+  if (manifest.manifest_version === 3) bridgeEntry.world = 'ISOLATED'
+  manifest.content_scripts = [bridgeEntry, ...entries]
 
   const serializedManifest = JSON.stringify(manifest, null, 2)
   if ((await stat(extensionPath)).isDirectory()) {
@@ -59,7 +68,7 @@ export async function stageExtensionContentScripts(
     await cp(extensionPath, stagedPath, { recursive: true })
     await Promise.all([
       writeFile(join(stagedPath, 'manifest.json'), serializedManifest),
-      writeFile(join(stagedPath, bootstrapFilename), captureScript)
+      writeFile(join(stagedPath, bridgeFilename), bridgeScript)
     ])
     return stagedPath
   }
@@ -68,7 +77,7 @@ export async function stageExtensionContentScripts(
   if (!archive.file('manifest.json'))
     throw new Error(`Packed extension ${extensionPath} has no manifest.json`)
   archive.file('manifest.json', serializedManifest)
-  archive.file(bootstrapFilename, captureScript)
+  archive.file(bridgeFilename, bridgeScript)
   const stagedPath = join(stagingDirectory, 'extension.xpi')
   await writeFile(stagedPath, await archive.generateAsync({ type: 'nodebuffer' }))
   return stagedPath

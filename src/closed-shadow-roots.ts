@@ -1,31 +1,19 @@
-export function captureClosedShadowRoots(): void {
-  const marker = '__playwrightClosedShadowRootCaptureInstalled__'
-  const nativeAttachShadow = Element.prototype
-    .attachShadow as typeof Element.prototype.attachShadow & {
-    __playwrightClosedShadowRootCaptureInstalled__?: boolean
-  }
-  if (nativeAttachShadow[marker]) return
+declare const exportFunction: (
+  implementation: (host: Element) => ShadowRoot | null,
+  target: Window,
+  options: { defineAs: string }
+) => unknown
 
-  const patchedAttachShadow = function (this: Element, init: ShadowRootInit): ShadowRoot {
-    const nativeRoot = nativeAttachShadow.call(this, init)
-    if (init.mode === 'closed') {
-      const host = (this as Element & { wrappedJSObject?: Element }).wrappedJSObject ?? this
-      const root =
-        (nativeRoot as ShadowRoot & { wrappedJSObject?: ShadowRoot }).wrappedJSObject ?? nativeRoot
-      if (!Object.prototype.hasOwnProperty.call(host, '__playwrightClosedShadowRoot__')) {
-        Object.defineProperty(host, '__playwrightClosedShadowRoot__', {
-          value: root,
-          configurable: false
-        })
-      }
-    }
-    return nativeRoot
-  }
-
-  Object.defineProperty(patchedAttachShadow, marker, { value: true })
-  Element.prototype.attachShadow = patchedAttachShadow
+export function installClosedShadowRootBridge(): void {
+  exportFunction(
+    (host: Element) =>
+      (host as Element & { openOrClosedShadowRoot?: ShadowRoot | null }).openOrClosedShadowRoot ??
+      host.shadowRoot,
+    window,
+    { defineAs: '__openpolyfillPlaywrightClosedShadowRoot__' }
+  )
 }
 
-export function closedShadowRootCaptureSource(): string {
-  return `(${captureClosedShadowRoots.toString()})();`
+export function closedShadowRootBridgeSource(): string {
+  return `(${installClosedShadowRootBridge.toString()})();`
 }
