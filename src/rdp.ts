@@ -1,7 +1,5 @@
-import JSZip from 'jszip'
 import { ActorFront, FirefoxRDP, TargetFront, type RDPResponse } from '@openpolyfill/firefox-rdp'
-import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readExtensionManifest } from './extension-package.js'
 
 export type PacketRecord = Record<string, unknown>
 
@@ -299,7 +297,7 @@ export class FirefoxRdpSession {
     this.attachWatcher(watcher)
     await watcher.call('watchTargets', { targetType: 'frame' })
     await watcher.call('watchTargets', { targetType: 'worker' })
-    const manifest = await readManifest(path)
+    const manifest = await readExtensionManifest(path)
     const backgroundTarget = hasBackground(manifest)
       ? await this.waitForTarget(
           (target) => isBackgroundTarget(target, manifest, installed.id),
@@ -393,23 +391,6 @@ export class FirefoxRdpSession {
     watcher.registerEvents('target-available-form', 'target-destroyed-form')
     watcher.on('target-available-form', (packet: RDPResponse) => this.handlePacket(packet))
   }
-}
-
-async function readManifest(path: string): Promise<Record<string, unknown>> {
-  let raw: string
-  try {
-    raw = await readFile(join(path, 'manifest.json'), 'utf8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOTDIR') throw error
-    const archive = await JSZip.loadAsync(await readFile(path))
-    const manifest = archive.file('manifest.json')
-    if (!manifest) throw new Error(`Packed extension ${path} has no manifest.json`)
-    raw = await manifest.async('string')
-  }
-  const parsed: unknown = JSON.parse(raw.replace(/^\uFEFF/, ''))
-  const manifest = record(parsed)
-  if (!manifest) throw new Error('Extension manifest must be a JSON object')
-  return manifest
 }
 
 function isBackgroundTarget(

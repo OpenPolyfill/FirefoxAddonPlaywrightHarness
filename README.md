@@ -150,6 +150,8 @@ Firefox RDP is an internal, version-sensitive protocol. Test against the Firefox
 
 The patch updates Playwright's Firefox resources only when needed. It enables Firefox Experiment APIs, allows Juggler access to `moz-extension://` documents, and locks `marionette.running` in `playwright.cfg`. Missing, ambiguous, or partially applied patch points fail as incompatible builds. The patch is idempotent.
 
+The package's `postinstall` script applies idempotent patches to Playwright's CSS and role selector engines so locator traversal can use stored closed-root references. Capture is installed automatically in page scripts; for statically declared content-script entries with a non-empty `js` list, the capture prelude runs before the extension's scripts, preserving the declared world and `run_at` timing. CSS-only entries remain unchanged. The harness stages a temporary copy of the extension; it does not modify the source directory or XPI. Content scripts registered dynamically at runtime are not rewritten. Closed-root capture preserves `host.shadowRoot`'s native behavior. If the installed Playwright bundle has unsupported selector sources, the harness fails fast at launch.
+
 The RDP endpoint is local, privileged, unauthenticated, and unencrypted. The harness binds it to localhost; do not expose it to a LAN or the public Internet.
 
 This package intentionally does not include DuckDuckGo's XPCOM network interception, proxy wrappers, local mocking server, or unrelated experiment API patches.

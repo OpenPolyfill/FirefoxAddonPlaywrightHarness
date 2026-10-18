@@ -1,4 +1,5 @@
 import { readFile, writeFile, rename } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import JSZip from 'jszip'
 import { firefox } from '@playwright/test'
@@ -45,6 +46,25 @@ function patchOrVerify(content: string, original: string, patched: string, file:
 export async function ensureFirefoxPatched(): Promise<void> {
   patchPromise ??= patchFirefoxInstallation()
   return patchPromise
+}
+
+export async function assertClosedShadowSelectorPatched(): Promise<void> {
+  const coreBundlePath = join(
+    dirname(createRequire(import.meta.url).resolve('playwright-core')),
+    'lib',
+    'coreBundle.js'
+  )
+  const source = await readFile(coreBundlePath, 'utf8')
+  if (
+    !source.includes(
+      'const shadows = [];\\n    const rootShadow = root.shadowRoot || root.__playwrightClosedShadowRoot__ || root.wrappedJSObject?.__playwrightClosedShadowRoot__;'
+    ) ||
+    !source.includes('const rootShadow = root.shadowRoot || root.__playwrightClosedShadowRoot__') ||
+    !source.includes('element.wrappedJSObject?.__playwrightClosedShadowRoot__')
+  )
+    throw new Error(
+      `Playwright's selector bundle is not patched for closed shadow roots: ${coreBundlePath}. Reinstall dependencies to run the harness postinstall patch.`
+    )
 }
 
 async function patchFirefoxInstallation(): Promise<void> {

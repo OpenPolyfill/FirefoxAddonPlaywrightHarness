@@ -1,6 +1,6 @@
 {
   "name": "@openpolyfill/firefox-addon-playwright-harness",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Standalone Playwright Firefox WebExtension harness backed by Firefox RDP",
   "type": "module",
   "engines": {
@@ -32,10 +32,12 @@
   },
   "files": [
     "dist",
+    "scripts/patch-closed-shadow-selectors.mjs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "postinstall": "node scripts/patch-closed-shadow-selectors.mjs",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "format": "prettier . --write",

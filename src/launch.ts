@@ -4,7 +4,9 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { acquireRdpPort } from './port.js'
 import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
-import { ensureFirefoxPatched } from './patch.js'
+import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
+import { captureClosedShadowRoots, closedShadowRootCaptureSource } from './closed-shadow-roots.js'
+import { stageExtensionContentScripts } from './extension-package.js'
 import { FirefoxRdpSession, RdpEvaluation } from './rdp.js'
 import { RdpIsolatedNamespace } from './isolated.js'
 import { RdpPopup } from './popup.js'
@@ -56,12 +58,19 @@ export async function launchFirefoxExtension(
   let extension: FirefoxExtension | undefined
   try {
     if (config.patchFirefox !== false) await ensureFirefoxPatched()
+    await assertClosedShadowSelectorPatched()
     context = await firefox.launchPersistentContext(
       userDataDir,
       launchOptions(config, releasePort.port)
     )
+    await context.addInitScript(captureClosedShadowRoots)
+    const installPath = await stageExtensionContentScripts(
+      extensionPath,
+      userDataDir,
+      closedShadowRootCaptureSource()
+    )
     session = await FirefoxRdpSession.connect(releasePort.port)
-    const installed = await session.installExtension(extensionPath)
+    const installed = await session.installExtension(installPath)
     extension = new FirefoxExtensionHandle(
       session,
       installed.id,

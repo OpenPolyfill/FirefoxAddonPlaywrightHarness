@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Document-start shadow roots",
+  "version": "1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "document-start-shadow-roots@openpolyfill.test"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://example.com/*"],
+      "js": ["main-world.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://example.com/*"],
+      "js": ["isolated-world.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    }
+  ]
+}
