@@ -1,3 +1,12 @@
+const bootstrapPageGlobal = window.wrappedJSObject
+const bootstrapGetterSeen = Object.getOwnPropertyNames(bootstrapPageGlobal).some((name) =>
+  name.startsWith('__openpolyfillClosedShadowRootBootstrap_')
+)
+document.documentElement.setAttribute(
+  'data-bootstrap-getter-seen-by-addon',
+  String(bootstrapGetterSeen)
+)
+
 const readyStateAtDocumentStart = document.readyState
 const hostId = 'isolated-world-host'
 

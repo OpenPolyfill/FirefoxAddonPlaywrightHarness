@@ -57,13 +57,21 @@ export async function assertClosedShadowSelectorPatched(): Promise<void> {
   const source = await readFile(coreBundlePath, 'utf8')
   if (
     !source.includes(
-      'const shadows = [];\\n    const rootShadow = root.shadowRoot || window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(root);'
+      'const shadows = [];\\n    const rootShadow = root.shadowRoot || globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(root);'
     ) ||
     !source.includes(
-      'const rootShadow = root.shadowRoot || window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(root)'
+      'const rootShadow = root.shadowRoot || globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(root)'
+    ) ||
+    !source.includes('globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(element)') ||
+    !source.includes(
+      'if (initScript.source.includes("/* @openpolyfill-utility-world */"))\n          worldName = UTILITY_WORLD_NAME2;'
     ) ||
     !source.includes(
-      'window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(element)'
+      'browserContext.initScripts.filter((script) => script.source.includes("/* @openpolyfill-utility-world */"))'
+    ) ||
+    !source.includes('ffPage.addInitScript(script, UTILITY_WORLD_NAME2)') ||
+    !source.includes(
+      'const utilityInitScripts = this.initScripts.filter((script) => script.source.includes("/* @openpolyfill-utility-world */"));'
     )
   )
     throw new Error(

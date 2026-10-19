@@ -7,3 +7,4 @@ package-lock.json
 website/package-lock.json
 *.map
 *.tgz
+test-results/

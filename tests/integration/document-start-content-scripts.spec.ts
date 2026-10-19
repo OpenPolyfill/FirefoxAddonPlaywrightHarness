@@ -8,6 +8,7 @@ import JSZip from 'jszip'
 import { baseTest, createFirefoxFixtures, expect } from './fixtures.js'
 
 const extensionPath = fileURLToPath(new URL('../fixtures/document-start-mv3', import.meta.url))
+const temporaryGetterPrefix = '__openpolyfillClosedShadowRootBootstrap_'
 const packedExtensionPath = join(tmpdir(), `document-start-mv3-${randomUUID()}.xpi`)
 const test = createFirefoxFixtures(baseTest, { extensionPath, headless: true })
 const packedTest = createFirefoxFixtures(baseTest, {
@@ -33,12 +34,30 @@ async function assertDocumentStartBridge(page: Page): Promise<void> {
       contentType: 'text/html',
       body: `<!doctype html>
         <html><body>
+          <script>window.__sawTemporaryClosedShadowGetter = Object.getOwnPropertyNames(window).some((name) => name.startsWith(${JSON.stringify(temporaryGetterPrefix)}))</script>
           <div id="main-world-host"></div>
           <div id="isolated-world-host"></div>
         </body></html>`
     })
   )
   await page.goto('https://example.com/')
+  expect(await page.locator('html').getAttribute('data-bootstrap-getter-seen-by-addon')).toBe(
+    'false'
+  )
+  expect(
+    await page.evaluate(
+      () =>
+        (window as typeof window & { __sawTemporaryClosedShadowGetter?: boolean })
+          .__sawTemporaryClosedShadowGetter
+    )
+  ).toBe(false)
+  expect(
+    await page.evaluate(
+      (prefix: string) =>
+        Object.getOwnPropertyNames(window).some((name) => name.startsWith(prefix)),
+      temporaryGetterPrefix
+    )
+  ).toBe(false)
 
   for (const { host, text, action } of [
     {
