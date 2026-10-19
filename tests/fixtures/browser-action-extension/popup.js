@@ -7,3 +7,7 @@
     if (!document.body.dataset.activeTab) await new Promise((resolve) => setTimeout(resolve, 25))
   }
 })()
+
+document.getElementById('confirm').addEventListener('click', () => {
+  document.body.dataset.confirmed = document.getElementById('message').value
+})

@@ -8,14 +8,18 @@ const test = createFirefoxFixtures(baseTest, {
 test('activates browserAction without a background context', async ({ page, extension }) => {
   expect(extension.background).toBeUndefined()
   const popup = await extension.activateAction(page, 'browserAction')
-  await popup.waitForSelector('[data-ready="true"]')
-  expect(await popup.evaluate(() => document.body.textContent)).toContain('Action popup')
+  await expect(popup.locator('[data-ready="true"]')).toBeVisible()
+  expect(await popup.locator('body').textContent()).toContain('Action popup')
+  await popup.close()
+  expect(popup.isClosed()).toBe(true)
 })
 
 test('activates pageAction without a background context', async ({ page, extension }) => {
   await page.goto('https://example.com/')
   expect(extension.background).toBeUndefined()
   const popup = await extension.activateAction(page, 'pageAction')
-  await popup.waitForSelector('[data-ready="true"]')
-  expect(await popup.evaluate(() => document.body.textContent)).toContain('Action popup')
+  await expect(popup.locator('[data-ready="true"]')).toBeVisible()
+  expect(await popup.locator('body').textContent()).toContain('Action popup')
+  await popup.close()
+  expect(popup.isClosed()).toBe(true)
 })

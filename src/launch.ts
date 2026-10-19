@@ -1,4 +1,4 @@
-import { firefox, type BrowserContext, type Page } from '@playwright/test'
+import { firefox, type BrowserContext, type Frame, type Page } from '@playwright/test'
 import { mkdtemp } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -7,7 +7,7 @@ import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
 import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
 import { FirefoxRdpSession, RdpEvaluation } from './rdp.js'
 import { RdpIsolatedNamespace } from './isolated.js'
-import { RdpPopup } from './popup.js'
+ 
 import type {
   FirefoxExtension,
   FirefoxHarnessConfig,
@@ -65,6 +65,7 @@ export async function launchFirefoxExtension(
     const installed = await session.installExtension(extensionPath)
     extension = new FirefoxExtensionHandle(
       session,
+      context,
       installed.id,
       extensionPath,
       installed.background
@@ -96,9 +97,12 @@ class FirefoxExtensionHandle implements FirefoxExtension {
   readonly background?: RdpEvaluation
   readonly isolatedContexts: RdpIsolatedNamespace
   private isolatedPage?: Page
+  private extensionBaseUrl?: string
   private closed = false
+
   constructor(
     private readonly session: FirefoxRdpSession,
+    private readonly browserContext: BrowserContext,
     readonly id: string,
     readonly installPath: string,
     background: RdpEvaluation | undefined
@@ -117,24 +121,83 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     this.isolatedPage = page
   }
 
-  async activateAction(page: Page, kind: ActionKind = 'browserAction'): Promise<RdpPopup> {
+  private async getExtensionBaseUrl(): Promise<string> {
+    if (this.extensionBaseUrl) return this.extensionBaseUrl
+    const chrome = this.session.chromeTarget
+    if (!chrome)
+      throw new Error('Firefox RDP did not expose the parent chrome target for extension lookup')
+    const evaluation = new RdpEvaluation(this.session.rdp, chrome.console())
+    const baseUrl = await evaluation.evaluate(`(() => {
+      const { ExtensionParent } = ChromeUtils.importESModule('resource://gre/modules/ExtensionParent.sys.mjs')
+      const extension = ExtensionParent.GlobalManager.extensionMap.get(${JSON.stringify(this.id)})
+      if (!extension) throw new Error('Firefox extension is not registered')
+      return extension.baseURI.spec
+    })()`)
+    if (typeof baseUrl !== 'string' || !baseUrl.startsWith('moz-extension://'))
+      throw new Error('Firefox extension did not expose a moz-extension base URL')
+    this.extensionBaseUrl = baseUrl
+    return baseUrl
+  }
+  private async waitForPopupPage(baseUrl: string, timeout: number): Promise<Page> {
+    return new Promise((resolve, reject) => {
+      const pendingPages = new Map<Page, (frame: Frame) => void>()
+      let settled = false
+      const timeoutId =
+        timeout > 0
+          ? setTimeout(() => {
+              settled = true
+              cleanup()
+              reject(new Error(`Timeout ${timeout}ms exceeded while waiting for popup page`))
+            }, timeout)
+          : undefined
+      const cleanup = () => {
+        clearTimeout(timeoutId)
+        this.browserContext.off('page', onPage)
+        this.browserContext.off('close', onContextClose)
+        for (const [page, listener] of pendingPages) page.off('framenavigated', listener)
+        pendingPages.clear()
+      }
+      const finish = (page: Page) => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve(page)
+      }
+      const onContextClose = () => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(new Error('Browser context closed while waiting for popup page'))
+      }
+      const onPage = (page: Page) => {
+        if (page.url().startsWith(baseUrl)) {
+          finish(page)
+          return
+        }
+        const onFrameNavigated = (frame: Frame) => {
+          if (frame === page.mainFrame() && frame.url().startsWith(baseUrl)) finish(page)
+        }
+        pendingPages.set(page, onFrameNavigated)
+        page.on('framenavigated', onFrameNavigated)
+        if (page.url().startsWith(baseUrl)) finish(page)
+      }
+      this.browserContext.on('page', onPage)
+      this.browserContext.on('close', onContextClose)
+    })
+  }
+
+  async activateAction(page: Page, kind: ActionKind = 'browserAction'): Promise<Page> {
     if (this.closed) throw new Error('Extension harness is closed')
+    const baseUrl = await this.getExtensionBaseUrl()
     await page.bringToFront()
-    const popupTarget = this.session.waitForTarget((target) => {
-      const url = typeof target.form?.url === 'string' ? target.form.url : ''
-      return (
-        target.form?.addonId === this.id &&
-        url.startsWith('moz-extension://') &&
-        !url.includes('_generated_background_page')
-      )
-    }, 15_000)
-    popupTarget.catch(() => undefined)
     const chrome = this.session.chromeTarget
     if (!chrome)
       throw new Error(
         'Firefox RDP did not expose the parent chrome target for extension action activation'
       )
     const chromeEvaluation = new RdpEvaluation(this.session.rdp, chrome.console())
+    const popup = this.waitForPopupPage(baseUrl, 15_000)
+    popup.catch(() => undefined)
     if (kind === 'pageAction') {
       await chromeEvaluation.evaluate(`(async () => {
         const action = PageActions.actions.find(action => action.extensionID === ${JSON.stringify(this.id)})
@@ -157,19 +220,13 @@ class FirefoxExtensionHandle implements FirefoxExtension {
         action.triggerAction(window)
       })()`)
     }
-    return new RdpPopup(this.session, await popupTarget)
+    return popup
   }
 
-  waitForPopup(options: { timeout?: number } = {}): Promise<RdpPopup> {
-    const target = this.session.waitForTarget((candidate) => {
-      const url = typeof candidate.form?.url === 'string' ? candidate.form.url : ''
-      return (
-        candidate.form?.addonId === this.id &&
-        url.startsWith('moz-extension://') &&
-        !url.includes('_generated_background_page')
-      )
-    }, options.timeout ?? 15_000)
-    return target.then((value) => new RdpPopup(this.session, value))
+  async waitForPopup(options: { timeout?: number } = {}): Promise<Page> {
+    if (this.closed) throw new Error('Extension harness is closed')
+    const baseUrl = await this.getExtensionBaseUrl()
+    return this.waitForPopupPage(baseUrl, options.timeout ?? 15_000)
   }
 
   async close(): Promise<void> {
@@ -177,6 +234,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     this.session.close()
   }
 }
+
 export function bindFirefoxExtensionPage(extension: FirefoxExtension, page: Page): void {
   if (!(extension instanceof FirefoxExtensionHandle))
     throw new Error('Firefox extension is not a harness extension handle')

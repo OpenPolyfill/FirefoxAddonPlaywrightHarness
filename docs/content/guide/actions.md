@@ -5,33 +5,49 @@ description: 'Activate browser actions and page actions and inspect their popup 
 
 ## Browser actions
 
-Bring the target page to the foreground and activate its browser action:
+Activate a browser action and use the returned popup as an ordinary Playwright
+`Page`:
 
 ```ts
 const popup = await extension.activateAction(page, 'browserAction')
-await popup.waitForSelector('[data-ready]')
-expect(await popup.evaluate(() => document.body.dataset.ready)).toBe('true')
+const message = popup.getByRole('textbox', { name: 'Message' })
+await message.fill('typed by Playwright')
+await popup.screenshot()
 ```
 
-The harness triggers both action types through privileged Firefox chrome code, independently of the extension background context, then waits for the extension popup target. It works in headless Firefox without navigating the Playwright page to the popup URL.
+The harness triggers the action through privileged Firefox chrome code and
+returns the popup's actual Playwright page. It is included in
+`page.context().pages()` and supports normal page locators, evaluation,
+screenshots, events, and close lifecycle.
 
 ## Page actions
 
-Page actions are activated against the specified page as well:
+Page actions are activated against the specified page:
 
 ```ts
 await page.goto('https://example.test')
 const popup = await extension.activateAction(page, 'pageAction')
-await popup.waitForSelector('body')
+expect(await popup.opener()).toBe(page)
 ```
 
-The returned popup is an RDP wrapper, not a Playwright `Page`. It exposes `url`, `evaluate`, `waitForSelector`, `click`, `waitForClose`, and `isClosed`.
+Both action methods return a `Page` associated with the owning browser context.
 
 ## Waiting and closing
 
+When an extension opens an action popup independently, wait for its page:
+
 ```ts
-await popup.waitForClose({ timeout: 5_000 })
-expect(popup.isClosed()).toBe(true)
+const popupPromise = extension.waitForPopup({ timeout: 5_000 })
+// Trigger the extension action.
+const popup = await popupPromise
 ```
 
-Use `extension.waitForPopup()` when the extension opens a popup independently of an explicit action call.
+Popup dismissal is reflected through the standard Playwright close event.
+Calling `Page.close()` hides the Firefox popup and closes its page:
+
+```ts
+const closed = popup.waitForEvent('close')
+await popup.close()
+await closed
+expect(popup.isClosed()).toBe(true)
+```

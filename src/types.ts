@@ -1,5 +1,5 @@
 import type { BrowserContext, Page } from '@playwright/test'
-import type { FirefoxRDP, TargetFront } from '@openpolyfill/firefox-rdp'
+import type { FirefoxRDP } from '@openpolyfill/firefox-rdp'
 
 export type ActionKind = 'browserAction' | 'pageAction'
 export type UrlMatcher = string | RegExp
@@ -58,18 +58,6 @@ export interface FirefoxIsolatedContexts {
 
 export type FirefoxIsolated = FirefoxIsolatedPage
 
-export interface FirefoxPopup {
-  readonly url: string
-  readonly target: TargetFront
-  evaluate<R = unknown>(
-    pageFunction: string | ((...args: unknown[]) => R | Promise<R>),
-    ...args: unknown[]
-  ): Promise<R>
-  waitForSelector(selector: string, options?: EvaluateOptions): Promise<void>
-  click(selector: string): Promise<void>
-  waitForClose(options?: EvaluateOptions): Promise<void>
-  isClosed(): boolean
-}
 
 export interface FirefoxExtension {
   readonly id: string
@@ -77,8 +65,8 @@ export interface FirefoxExtension {
   readonly isolated: FirefoxIsolated
   readonly isolatedContexts: FirefoxIsolatedContexts
   installPath: string
-  activateAction(page: Page, kind?: ActionKind): Promise<FirefoxPopup>
-  waitForPopup(options?: EvaluateOptions): Promise<FirefoxPopup>
+  activateAction(page: Page, kind?: ActionKind): Promise<Page>
+  waitForPopup(options?: { timeout?: number }): Promise<Page>
   close(): Promise<void>
 }
 
