@@ -15,50 +15,42 @@ const source = await readFile(coreBundlePath, 'utf8')
 
 const roleOriginal =
   'const shadows = [];\\n    if (root.shadowRoot)\\n      shadows.push(root.shadowRoot);\\n    for (const element of root.querySelectorAll("*")) {\\n      match(element);\\n      if (element.shadowRoot)\\n        shadows.push(element.shadowRoot);\\n    }\\n    shadows.forEach(query);'
-const rolePreviouslyPatched =
-  'const shadows = [];\\n    const rootShadow = root.shadowRoot || root.__playwrightClosedShadowRoot__;\\n    if (rootShadow)\\n      shadows.push(rootShadow);\\n    for (const element of root.querySelectorAll("*")) {\\n      match(element);\\n      const shadowRoot = element.shadowRoot || element.__playwrightClosedShadowRoot__;\\n      if (shadowRoot)\\n        shadows.push(shadowRoot);\\n    }\\n    shadows.forEach(query);'
-const roleCapturePatched =
-  'const shadows = [];\\n    const rootShadow = root.shadowRoot || root.__playwrightClosedShadowRoot__ || root.wrappedJSObject?.__playwrightClosedShadowRoot__;\\n    if (rootShadow)\\n      shadows.push(rootShadow);\\n    for (const element of root.querySelectorAll("*")) {\\n      match(element);\\n      const shadowRoot = element.shadowRoot || element.__playwrightClosedShadowRoot__ || element.wrappedJSObject?.__playwrightClosedShadowRoot__;\\n      if (shadowRoot)\\n        shadows.push(shadowRoot);\\n    }\\n    shadows.forEach(query);'
-const rolePageBridgePatched =
-  'const shadows = [];\\n    const rootShadow = root.shadowRoot || window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(root);\\n    if (rootShadow)\\n      shadows.push(rootShadow);\\n    for (const element of root.querySelectorAll("*")) {\\n      match(element);\\n      const shadowRoot = element.shadowRoot || window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(element);\\n      if (shadowRoot)\\n        shadows.push(shadowRoot);\\n    }\\n    shadows.forEach(query);'
-const roleUtilityBridgePatched =
+const roleDirectGetterPatched =
   'const shadows = [];\\n    const rootShadow = root.shadowRoot || globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(root);\\n    if (rootShadow)\\n      shadows.push(rootShadow);\\n    for (const element of root.querySelectorAll("*")) {\\n      match(element);\\n      const shadowRoot = element.shadowRoot || globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(element);\\n      if (shadowRoot)\\n        shadows.push(shadowRoot);\\n    }\\n    shadows.forEach(query);'
+const roleElementGetterPatched =
+  'const shadows = [];\\n    const rootShadow = root.shadowRoot || root.openOrClosedShadowRoot;\\n    if (rootShadow)\\n      shadows.push(rootShadow);\\n    for (const element of root.querySelectorAll("*")) {\\n      match(element);\\n      const shadowRoot = element.shadowRoot || element.openOrClosedShadowRoot;\\n      if (shadowRoot)\\n        shadows.push(shadowRoot);\\n    }\\n    shadows.forEach(query);'
 
 const selectorOriginal =
   'if (root.shadowRoot)\\n          query(root.shadowRoot);\\n        for (const element of root.querySelectorAll("*")) {\\n          if (element.shadowRoot)\\n            query(element.shadowRoot);\\n        }'
-const selectorPreviouslyPatched =
-  'const rootShadow = root.shadowRoot || root.__playwrightClosedShadowRoot__;\\n        if (rootShadow)\\n          query(rootShadow);\\n        for (const element of root.querySelectorAll("*")) {\\n          const shadowRoot = element.shadowRoot || element.__playwrightClosedShadowRoot__;\\n          if (shadowRoot)\\n            query(shadowRoot);\\n        }'
-const selectorCapturePatched =
-  'const rootShadow = root.shadowRoot || root.__playwrightClosedShadowRoot__ || root.wrappedJSObject?.__playwrightClosedShadowRoot__;\\n        if (rootShadow)\\n          query(rootShadow);\\n        for (const element of root.querySelectorAll("*")) {\\n          const shadowRoot = element.shadowRoot || element.__playwrightClosedShadowRoot__ || element.wrappedJSObject?.__playwrightClosedShadowRoot__;\\n          if (shadowRoot)\\n            query(shadowRoot);\\n        }'
-const selectorPageBridgePatched =
-  'const rootShadow = root.shadowRoot || window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(root);\\n        if (rootShadow)\\n          query(rootShadow);\\n        for (const element of root.querySelectorAll("*")) {\\n          const shadowRoot = element.shadowRoot || window.wrappedJSObject?.__openpolyfillPlaywrightClosedShadowRoot__?.(element);\\n          if (shadowRoot)\\n            query(shadowRoot);\\n        }'
-const selectorUtilityBridgePatched =
+const selectorDirectGetterPatched =
   'const rootShadow = root.shadowRoot || globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(root);\\n        if (rootShadow)\\n          query(rootShadow);\\n        for (const element of root.querySelectorAll("*")) {\\n          const shadowRoot = element.shadowRoot || globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(element);\\n          if (shadowRoot)\\n            query(shadowRoot);\\n        }'
+const selectorElementGetterPatched =
+  'const rootShadow = root.shadowRoot || root.openOrClosedShadowRoot;\\n        if (rootShadow)\\n          query(rootShadow);\\n        for (const element of root.querySelectorAll("*")) {\\n          const shadowRoot = element.shadowRoot || element.openOrClosedShadowRoot;\\n          if (shadowRoot)\\n            query(shadowRoot);\\n        }'
 
-const utilityInitOriginal = `async addInitScript(initScript, worldName) {
+const oldUtilityInitOriginal = `async addInitScript(initScript, worldName) {
         this._initScripts.push({ initScript, worldName });`
-const utilityInitPatched = `async addInitScript(initScript, worldName) {
+const oldUtilityInitPatched = `async addInitScript(initScript, worldName) {
         if (initScript.source.includes("/* @openpolyfill-utility-world */"))
           worldName = UTILITY_WORLD_NAME2;
         this._initScripts.push({ initScript, worldName });`
-const utilityInitLegacyPatched = utilityInitPatched.replaceAll('.includes(', '.startsWith(')
-const utilityPageBootstrapOriginal =
+const oldUtilityInitLegacyPatched = oldUtilityInitPatched.replaceAll('.includes(', '.startsWith(')
+const oldUtilityPageBootstrapOriginal =
   'this.addInitScript(new InitScript(this._page, ""), UTILITY_WORLD_NAME2).catch((e) => this._reportAsNew(e));'
-const utilityPageBootstrapPatched =
+const oldUtilityPageBootstrapPatched =
   'Promise.all([this.addInitScript(new InitScript(this._page, ""), UTILITY_WORLD_NAME2), ...browserContext.initScripts.filter((script) => script.source.includes("/* @openpolyfill-utility-world */")).map((script) => this.addInitScript(script, UTILITY_WORLD_NAME2))]).catch((e) => this._reportAsNew(e));'
-const utilityPageBootstrapLegacyPatched = utilityPageBootstrapPatched.replaceAll(
+const oldUtilityPageBootstrapLegacyPatched = oldUtilityPageBootstrapPatched.replaceAll(
   '.includes(',
   '.startsWith('
 )
 
-const utilityContextUpdateOriginal = `async _updateInitScripts() {
+const oldUtilityContextUpdateOriginal = `async _updateInitScripts() {
         const bindingScripts = [...this._pageBindings.values()].map((binding) => binding.initScript.source);
         if (this.bindingsInitScript)
           bindingScripts.unshift(this.bindingsInitScript.source);
         const initScripts = this.initScripts.map((script) => script.source);
         await this._browser.session.send("Browser.setInitScripts", { browserContextId: this._browserContextId, scripts: [...bindingScripts, ...initScripts].map((script) => ({ script })) });
       }`
-const utilityContextUpdatePatched = `async _updateInitScripts() {
+const oldUtilityContextUpdatePatched = `async _updateInitScripts() {
         const bindingScripts = [...this._pageBindings.values()].map((binding) => binding.initScript.source);
         if (this.bindingsInitScript)
           bindingScripts.unshift(this.bindingsInitScript.source);
@@ -75,7 +67,7 @@ const utilityContextUpdatePatched = `async _updateInitScripts() {
           await Promise.all(utilityInitScripts.filter((script) => !currentInitSet.has(script)).map((script) => ffPage.addInitScript(script, UTILITY_WORLD_NAME2)));
         }));
       }`
-const utilityContextUpdateLegacyPatched = utilityContextUpdatePatched.replaceAll(
+const oldUtilityContextUpdateLegacyPatched = oldUtilityContextUpdatePatched.replaceAll(
   '.includes(',
   '.startsWith('
 )
@@ -104,48 +96,58 @@ function replaceOneKnownVersion(text, versions, replacement, description) {
     )
   return text.replace(matching[0], replacement)
 }
+function restoreKnownVersion(text, versions, original, description) {
+  const matching = versions.filter((version) => text.includes(version))
+  if (matching.length > 1)
+    throw new Error(
+      `Unsupported or ambiguous legacy Playwright ${description} patch in ${coreBundlePath}`
+    )
+  if (matching.length === 0) return text
+  if (countOccurrences(text, matching[0]) !== 1)
+    throw new Error(
+      `Expected exactly one legacy Playwright ${description} patch in ${coreBundlePath}`
+    )
+  return matching[0] === original ? text : text.replace(matching[0], original)
+}
 
 let patched = source
 patched = replaceOneKnownVersion(
   patched,
-  [
-    roleOriginal,
-    rolePreviouslyPatched,
-    roleCapturePatched,
-    rolePageBridgePatched,
-    roleUtilityBridgePatched
-  ],
-  roleUtilityBridgePatched,
+  [roleOriginal, roleDirectGetterPatched, roleElementGetterPatched],
+  roleElementGetterPatched,
   'role selector'
 )
 patched = replaceOneKnownVersion(
   patched,
-  [
-    selectorOriginal,
-    selectorPreviouslyPatched,
-    selectorCapturePatched,
-    selectorPageBridgePatched,
-    selectorUtilityBridgePatched
-  ],
-  selectorUtilityBridgePatched,
+  [selectorOriginal, selectorDirectGetterPatched, selectorElementGetterPatched],
+  selectorElementGetterPatched,
   'CSS selector'
 )
-patched = replaceOneKnownVersion(
+
+patched = restoreKnownVersion(
   patched,
-  [utilityInitOriginal, utilityInitLegacyPatched, utilityInitPatched],
-  utilityInitPatched,
+  [oldUtilityInitOriginal, oldUtilityInitPatched, oldUtilityInitLegacyPatched],
+  oldUtilityInitOriginal,
   'utility-world init script'
 )
-patched = replaceOneKnownVersion(
+patched = restoreKnownVersion(
   patched,
-  [utilityPageBootstrapOriginal, utilityPageBootstrapLegacyPatched, utilityPageBootstrapPatched],
-  utilityPageBootstrapPatched,
+  [
+    oldUtilityPageBootstrapOriginal,
+    oldUtilityPageBootstrapPatched,
+    oldUtilityPageBootstrapLegacyPatched
+  ],
+  oldUtilityPageBootstrapOriginal,
   'utility-world page bootstrap'
 )
-patched = replaceOneKnownVersion(
+patched = restoreKnownVersion(
   patched,
-  [utilityContextUpdateOriginal, utilityContextUpdateLegacyPatched, utilityContextUpdatePatched],
-  utilityContextUpdatePatched,
+  [
+    oldUtilityContextUpdateOriginal,
+    oldUtilityContextUpdatePatched,
+    oldUtilityContextUpdateLegacyPatched
+  ],
+  oldUtilityContextUpdateOriginal,
   'Firefox context init script lifecycle'
 )
 

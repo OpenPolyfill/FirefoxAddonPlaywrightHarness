@@ -1,12 +1,12 @@
-const bootstrapPageGlobal = window.wrappedJSObject
-const bootstrapGetterSeen = Object.getOwnPropertyNames(bootstrapPageGlobal).some((name) =>
-  name.startsWith('__openpolyfillClosedShadowRootBootstrap_')
-)
+const getterName = 'openOrClosedShadowRoot'
+const pageGlobal = window.wrappedJSObject
+const getterVisibleToAddon =
+  Object.prototype.hasOwnProperty.call(globalThis, getterName) ||
+  Object.prototype.hasOwnProperty.call(pageGlobal, getterName)
 document.documentElement.setAttribute(
-  'data-bootstrap-getter-seen-by-addon',
-  String(bootstrapGetterSeen)
+  'data-utility-getter-visible-to-addon',
+  String(getterVisibleToAddon)
 )
-
 const readyStateAtDocumentStart = document.readyState
 const hostId = 'isolated-world-host'
 

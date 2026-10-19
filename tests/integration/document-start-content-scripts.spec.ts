@@ -8,7 +8,7 @@ import JSZip from 'jszip'
 import { baseTest, createFirefoxFixtures, expect } from './fixtures.js'
 
 const extensionPath = fileURLToPath(new URL('../fixtures/document-start-mv3', import.meta.url))
-const temporaryGetterPrefix = '__openpolyfillClosedShadowRootBootstrap_'
+const closedShadowPropertyName = 'openOrClosedShadowRoot'
 const packedExtensionPath = join(tmpdir(), `document-start-mv3-${randomUUID()}.xpi`)
 const test = createFirefoxFixtures(baseTest, { extensionPath, headless: true })
 const packedTest = createFirefoxFixtures(baseTest, {
@@ -27,37 +27,39 @@ packedTest.afterAll(async () => {
   await rm(packedExtensionPath, { force: true })
 })
 
-async function assertDocumentStartBridge(page: Page): Promise<void> {
+async function assertDocumentStartGetterIsolation(page: Page): Promise<void> {
   await page.route('https://example.com/**', (route) =>
     route.fulfill({
       status: 200,
       contentType: 'text/html',
       body: `<!doctype html>
         <html><body>
-          <script>window.__sawTemporaryClosedShadowGetter = Object.getOwnPropertyNames(window).some((name) => name.startsWith(${JSON.stringify(temporaryGetterPrefix)}))</script>
+          <script>window.__utilityGetterVisibleToPage = Object.prototype.hasOwnProperty.call(window, ${JSON.stringify(closedShadowPropertyName)})</script>
           <div id="main-world-host"></div>
           <div id="isolated-world-host"></div>
         </body></html>`
     })
   )
   await page.goto('https://example.com/')
-  expect(await page.locator('html').getAttribute('data-bootstrap-getter-seen-by-addon')).toBe(
+  expect(await page.locator('html').getAttribute('data-utility-getter-visible-to-addon')).toBe(
     'false'
   )
   expect(
     await page.evaluate(
       () =>
-        (window as typeof window & { __sawTemporaryClosedShadowGetter?: boolean })
-          .__sawTemporaryClosedShadowGetter
+        (window as typeof window & { __utilityGetterVisibleToPage?: boolean })
+          .__utilityGetterVisibleToPage
     )
   ).toBe(false)
   expect(
     await page.evaluate(
-      (prefix: string) =>
-        Object.getOwnPropertyNames(window).some((name) => name.startsWith(prefix)),
-      temporaryGetterPrefix
+      (name: string) => ({
+        type: typeof (globalThis as typeof globalThis & Record<string, unknown>)[name],
+        own: Object.prototype.hasOwnProperty.call(globalThis, name)
+      }),
+      closedShadowPropertyName
     )
-  ).toBe(false)
+  ).toEqual({ type: 'undefined', own: false })
 
   for (const { host, text, action } of [
     {
@@ -77,13 +79,20 @@ async function assertDocumentStartBridge(page: Page): Promise<void> {
     await expect(page.getByText(text)).toBeVisible()
     await expect(page.getByRole('button', { name: action })).toBeVisible()
     expect(await page.locator(host).evaluate((element) => element.shadowRoot)).toBeNull()
+    expect(
+      await page.locator(host).evaluate((element) => {
+        const root = (element as Element & { openOrClosedShadowRoot?: ShadowRoot })
+          .openOrClosedShadowRoot
+        return root !== undefined && root !== null
+      })
+    ).toBe(false)
   }
 }
 
 test('MV3 document_start scripts expose roots from MAIN and ISOLATED worlds', async ({ page }) =>
-  assertDocumentStartBridge(page))
+  assertDocumentStartGetterIsolation(page))
 
 packedTest(
   'packed MV3 document_start exposes roots from MAIN and ISOLATED worlds',
-  async ({ page }) => assertDocumentStartBridge(page)
+  async ({ page }) => assertDocumentStartGetterIsolation(page)
 )

@@ -24,7 +24,7 @@ The `extension` fixture exposes:
 - `waitForPopup()` — waits for an extension popup target.
 - `close()` — closes the extension harness.
 
-The configured extension is installed directly from its source directory or XPI. Closed-shadow locator support uses a separate temporary helper add-on and does not rewrite the target extension.
+The configured extension is installed directly from its source directory or XPI. Closed-shadow locator support patches Playwright Firefox's Juggler to install a privileged getter in its utility sandbox; it does not add or modify an extension.
 
 ## Background evaluation
 

@@ -5,6 +5,49 @@ import JSZip from 'jszip'
 import { firefox } from '@playwright/test'
 
 export const PATCH_MARKER = '// --- Firefox Addon Playwright Harness ---'
+const utilityWorldName = '__playwright_utility_world__'
+const closedShadowPropertyName = 'openOrClosedShadowRoot'
+const closedShadowHelperName = '__openpolyfillClosedShadowRootHelper__'
+const legacyClosedShadowGetterName = '__openpolyfillClosedShadowRootForPlaywright__'
+const frameTreePath = 'chrome/juggler/content/content/FrameTree.js'
+const frameTreeContextCreation = `    const world = this._runtime.createExecutionContext(this.domWindow(), sandbox, {
+      frameId: this.id(),
+      name,
+    });`
+const frameTreeGetterPatch = `    if (name === '${utilityWorldName}') {
+      const nativeGetter = Object.getOwnPropertyDescriptor(
+        this.domWindow().Element.prototype,
+        '${closedShadowPropertyName}'
+      )?.get;
+      if (!nativeGetter)
+        throw new Error('Firefox openOrClosedShadowRoot getter is unavailable');
+      Cu.exportFunction(
+        (host) => nativeGetter.call(host) ?? host.shadowRoot,
+        sandbox,
+        { defineAs: '${closedShadowHelperName}' }
+      );
+      Cu.evalInSandbox(
+        '(function() {' +
+          'const getClosedRoot = globalThis["${closedShadowHelperName}"];' +
+          'Object.defineProperty(Element.prototype, "${closedShadowPropertyName}", {' +
+            'configurable: true,' +
+            'get() { return getClosedRoot(this); }' +
+          '});' +
+          'if (!delete globalThis["${closedShadowHelperName}"]) throw new Error("Temporary closed-shadow getter leaked");' +
+        '})()',
+        sandbox
+      );
+    }
+`
+const legacyFrameTreeGetterPatch = `    if (name === '${utilityWorldName}') {
+      Cu.exportFunction(
+        (host) => host.openOrClosedShadowRoot ?? host.shadowRoot,
+        sandbox,
+        { defineAs: '${legacyClosedShadowGetterName}' }
+      );
+    }
+`
+let closedShadowPatchAssertion: Promise<void> | undefined
 let patchPromise: Promise<void> | undefined
 
 function countOccurrences(content: string, needle: string): number {
@@ -48,7 +91,15 @@ export async function ensureFirefoxPatched(): Promise<void> {
   return patchPromise
 }
 
-export async function assertClosedShadowSelectorPatched(): Promise<void> {
+export function assertClosedShadowSelectorPatched(): Promise<void> {
+  closedShadowPatchAssertion ??= verifyClosedShadowSupport().catch((error: unknown) => {
+    closedShadowPatchAssertion = undefined
+    throw error
+  })
+  return closedShadowPatchAssertion
+}
+
+async function verifyClosedShadowSupport(): Promise<void> {
   const coreBundlePath = join(
     dirname(createRequire(import.meta.url).resolve('playwright-core')),
     'lib',
@@ -57,26 +108,51 @@ export async function assertClosedShadowSelectorPatched(): Promise<void> {
   const source = await readFile(coreBundlePath, 'utf8')
   if (
     !source.includes(
-      'const shadows = [];\\n    const rootShadow = root.shadowRoot || globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(root);'
+      'const shadows = [];\\n    const rootShadow = root.shadowRoot || root.openOrClosedShadowRoot;'
     ) ||
-    !source.includes(
-      'const rootShadow = root.shadowRoot || globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(root)'
-    ) ||
-    !source.includes('globalThis.__openpolyfillClosedShadowRootForPlaywright__?.(element)') ||
-    !source.includes(
-      'if (initScript.source.includes("/* @openpolyfill-utility-world */"))\n          worldName = UTILITY_WORLD_NAME2;'
-    ) ||
-    !source.includes(
-      'browserContext.initScripts.filter((script) => script.source.includes("/* @openpolyfill-utility-world */"))'
-    ) ||
-    !source.includes('ffPage.addInitScript(script, UTILITY_WORLD_NAME2)') ||
-    !source.includes(
-      'const utilityInitScripts = this.initScripts.filter((script) => script.source.includes("/* @openpolyfill-utility-world */"));'
-    )
-  )
+    !source.includes('root.shadowRoot || root.openOrClosedShadowRoot') ||
+    !source.includes('element.shadowRoot || element.openOrClosedShadowRoot') ||
+    source.includes(legacyClosedShadowGetterName) ||
+    !source.includes(`UTILITY_WORLD_NAME2 = "${utilityWorldName}";`) ||
+    source.includes('/* @openpolyfill-utility-world */')
+  ) {
     throw new Error(
       `Playwright's selector bundle is not patched for closed shadow roots: ${coreBundlePath}. Reinstall dependencies to run the harness postinstall patch.`
     )
+  }
+
+  const binDir = dirname(firefox.executablePath())
+  const firefoxDir = process.platform === 'darwin' ? join(binDir, '..', 'Resources') : binDir
+  const zip = await JSZip.loadAsync(await readFile(join(firefoxDir, 'omni.ja')))
+  const frameTree = zip.file(frameTreePath)
+  const sourceInFirefox = frameTree ? await frameTree.async('string') : ''
+  if (countOccurrences(sourceInFirefox, frameTreeGetterPatch) !== 1) {
+    throw new Error(
+      `Playwright Firefox's Juggler utility world is not patched for closed shadow roots: omni.ja:${frameTreePath}`
+    )
+  }
+}
+
+function patchFrameTreeGetter(content: string, file: string): string {
+  const currentCount = countOccurrences(content, frameTreeGetterPatch)
+  const legacyCount = countOccurrences(content, legacyFrameTreeGetterPatch)
+  if (currentCount === 1 && legacyCount === 0) return content
+  if (currentCount === 0 && legacyCount === 1)
+    return replaceExactlyOnce(content, legacyFrameTreeGetterPatch, frameTreeGetterPatch, file)
+  if (currentCount === 0 && legacyCount === 0)
+    return replaceExactlyOnce(
+      content,
+      frameTreeContextCreation,
+      frameTreeGetterPatch + frameTreeContextCreation,
+      file
+    )
+  throw new Error(`Incompatible partial Juggler utility getter patch in ${file}`)
+}
+
+async function writeOmniArchive(zip: JSZip, omniPath: string): Promise<void> {
+  const omniTmp = `${omniPath}.tmp-${process.pid}`
+  await writeFile(omniTmp, await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' }))
+  await rename(omniTmp, omniPath)
 }
 
 async function patchFirefoxInstallation(): Promise<void> {
@@ -95,12 +171,15 @@ async function patchFirefoxInstallation(): Promise<void> {
   const jugglerPath = 'chrome/juggler/content/content/JugglerFrameChild.jsm'
   const addon = zip.file(addonPath)
   const juggler = zip.file(jugglerPath)
-  if (!addon || !juggler)
+  const frameTree = zip.file(frameTreePath)
+  if (!addon || !juggler || !frameTree)
     throw new Error(
-      `Incompatible Playwright Firefox build: omni.ja is missing ${!addon ? addonPath : jugglerPath}`
+      `Incompatible Playwright Firefox build: omni.ja is missing ${!addon ? addonPath : !juggler ? jugglerPath : frameTreePath}`
     )
   const addonBefore = await addon.async('string')
   const jugglerBefore = await juggler.async('string')
+  const frameTreeBefore = await frameTree.async('string')
+  const frameTreeSource = patchFrameTreeGetter(frameTreeBefore, `omni.ja:${frameTreePath}`)
   const markerCount = countOccurrences(cfg, PATCH_MARKER)
   const prefNeedle = 'lockPref("marionette.running", true);'
   const prefCount = countOccurrences(cfg, prefNeedle)
@@ -120,6 +199,10 @@ async function patchFirefoxInstallation(): Promise<void> {
         `Incompatible partially patched Playwright Firefox installation: ${firefoxDir}`
       )
     }
+    if (frameTreeSource !== frameTreeBefore) {
+      zip.file(frameTreePath, frameTreeSource)
+      await writeOmniArchive(zip, omniPath)
+    }
     return
   }
   const addonSource = patchOrVerify(
@@ -136,12 +219,11 @@ async function patchFirefoxInstallation(): Promise<void> {
   )
   zip.file(addonPath, addonSource)
   zip.file(jugglerPath, jugglerSource)
+  zip.file(frameTreePath, frameTreeSource)
 
   const suffix = `\n${PATCH_MARKER}\nlockPref("marionette.running", true);\n// --- End Firefox Addon Playwright Harness ---\n`
-  const omniTmp = `${omniPath}.tmp-${process.pid}`
   const cfgTmp = `${cfgPath}.tmp-${process.pid}`
-  await writeFile(omniTmp, await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' }))
-  await rename(omniTmp, omniPath)
+  await writeOmniArchive(zip, omniPath)
   await writeFile(cfgTmp, cfg + suffix)
   await rename(cfgTmp, cfgPath)
 }

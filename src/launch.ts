@@ -1,16 +1,10 @@
 import { firefox, type BrowserContext, type Page } from '@playwright/test'
-import { randomUUID } from 'node:crypto'
 import { mkdtemp } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { acquireRdpPort } from './port.js'
 import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
 import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
-import {
-  closedShadowRootBridgeSource,
-  closedShadowRootUtilityInitScript
-} from './closed-shadow-roots.js'
-import { createClosedShadowBridgeExtension } from './extension-package.js'
 import { FirefoxRdpSession, RdpEvaluation } from './rdp.js'
 import { RdpIsolatedNamespace } from './isolated.js'
 import { RdpPopup } from './popup.js'
@@ -67,15 +61,8 @@ export async function launchFirefoxExtension(
       userDataDir,
       launchOptions(config, releasePort.port)
     )
-    const bridgeCapability = randomUUID()
-    const bridgeExtensionPath = await createClosedShadowBridgeExtension(
-      userDataDir,
-      closedShadowRootBridgeSource(bridgeCapability)
-    )
     session = await FirefoxRdpSession.connect(releasePort.port)
     const installed = await session.installExtension(extensionPath)
-    await context.addInitScript(closedShadowRootUtilityInitScript(bridgeCapability))
-    await session.installTemporaryAddon(bridgeExtensionPath)
     extension = new FirefoxExtensionHandle(
       session,
       installed.id,

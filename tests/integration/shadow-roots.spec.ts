@@ -3,7 +3,7 @@ import type { FirefoxIsolatedPage } from '../../src/types.js'
 import type { Page } from '@playwright/test'
 
 const extensionPath = new URL('../fixtures/no-background-browser-action', import.meta.url).pathname
-const bootstrapGlobalPrefix = '__openpolyfillClosedShadowRootBootstrap_'
+const closedShadowPropertyName = 'openOrClosedShadowRoot'
 
 const test = createFirefoxFixtures(baseTest, { extensionPath, headless: true })
 
@@ -12,52 +12,69 @@ async function openHostPage(page: Page): Promise<void> {
     route.fulfill({
       status: 200,
       contentType: 'text/html',
-      body: `<!doctype html><html><body>
-        <script>window.__sawTemporaryClosedShadowGetter = Object.getOwnPropertyNames(window).some((name) => name.startsWith(${JSON.stringify(bootstrapGlobalPrefix)}))</script>
-        <div id="host"></div>
-      </body></html>`
+      body: '<!doctype html><html><body><div id="host"></div></body></html>'
     })
   )
   await page.goto('https://example.com/')
 }
 
-async function assertBridgeHidden(page: Page, isolated: FirefoxIsolatedPage): Promise<void> {
-  const pageGlobals = await page.evaluate((prefix: string) => {
+async function assertGetterIsUtilityWorldOnly(
+  page: Page,
+  isolated: FirefoxIsolatedPage
+): Promise<void> {
+  const pageGetter = await page.evaluate((name: string) => {
     const globals = globalThis as typeof globalThis & Record<string, unknown>
     return {
-      capability: typeof globals.__openpolyfillClosedShadowRootCapability__,
-      getter: typeof globals.__openpolyfillClosedShadowRootGetter__,
-      access: typeof globals.__openpolyfillClosedShadowRootForPlaywright__,
-      temporaryGetter: Object.getOwnPropertyNames(globalThis).some((name) =>
-        name.startsWith(prefix)
-      ),
-      visibleToPageScript: globals.__sawTemporaryClosedShadowGetter
+      type: typeof globals[name],
+      own: Object.prototype.hasOwnProperty.call(globalThis, name)
     }
-  }, bootstrapGlobalPrefix)
-  expect(pageGlobals).toEqual({
-    capability: 'undefined',
-    getter: 'undefined',
-    access: 'undefined',
-    temporaryGetter: false,
-    visibleToPageScript: false
-  })
+  }, closedShadowPropertyName)
+  expect(pageGetter).toEqual({ type: 'undefined', own: false })
 
-  const addonGlobals = await isolated.evaluate(() => {
+  const pageCanAccessClosedRoot = await page.locator('#host').evaluate((host) => {
+    const root = (host as Element & { openOrClosedShadowRoot?: ShadowRoot }).openOrClosedShadowRoot
+    return root !== undefined && root !== null
+  })
+  expect(pageCanAccessClosedRoot).toBe(false)
+  const pagePrototypeGetterSource = await page.evaluate((name: string) => {
+    const getter = Object.getOwnPropertyDescriptor(Element.prototype, name)?.get
+    return typeof getter === 'function' ? Function.prototype.toString.call(getter) : ''
+  }, closedShadowPropertyName)
+  expect(pagePrototypeGetterSource).not.toContain('getClosedRoot')
+
+  const addonGetter = await isolated.evaluate((name: string) => {
     const globals = globalThis as typeof globalThis & Record<string, unknown>
+    const pageGlobal = (window as typeof window & { wrappedJSObject?: Window }).wrappedJSObject
+    const pageGlobals = pageGlobal as (Window & Record<string, unknown>) | undefined
+    const prototypeGetter = Object.getOwnPropertyDescriptor(Element.prototype, name)?.get
     return {
-      capability: typeof globals.__openpolyfillClosedShadowRootCapability__,
-      getter: typeof globals.__openpolyfillClosedShadowRootGetter__,
-      access: typeof globals.__openpolyfillClosedShadowRootForPlaywright__
+      addonType: typeof globals[name],
+      addonOwn: Object.prototype.hasOwnProperty.call(globalThis, name),
+      addonPrototypeGetterSource:
+        typeof prototypeGetter === 'function'
+          ? Function.prototype.toString.call(prototypeGetter)
+          : '',
+      pageType: typeof pageGlobals?.[name],
+      pageOwn: pageGlobals ? Object.prototype.hasOwnProperty.call(pageGlobals, name) : false
     }
+  }, closedShadowPropertyName)
+  expect(addonGetter).toEqual({
+    addonType: 'undefined',
+    addonOwn: false,
+    addonPrototypeGetterSource: expect.not.stringContaining('getClosedRoot'),
+    pageType: 'undefined',
+    pageOwn: false
   })
-  expect(addonGlobals).toEqual({
-    capability: 'undefined',
-    getter: 'undefined',
-    access: 'undefined'
+  const addonCanReadClosedRoot = await isolated.evaluate(() => {
+    const host = document.querySelector('#host')!
+    return (
+      (host as Element & { openOrClosedShadowRoot?: ShadowRoot }).openOrClosedShadowRoot != null
+    )
   })
+  expect(addonCanReadClosedRoot).toBe(false)
 }
 
-test('Playwright locators pierce a page-created closed root without opening or exposing the bridge', async ({
+test('Playwright locators pierce a page-created closed root without exposing the utility getter', async ({
   page,
   extension
 }) => {
@@ -70,7 +87,7 @@ test('Playwright locators pierce a page-created closed root without opening or e
   await expect(page.getByText('page realm')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Launch' })).toBeVisible()
   expect(await page.locator('#host').evaluate((host) => host.shadowRoot)).toBeNull()
-  await assertBridgeHidden(page, extension.isolated)
+  await assertGetterIsUtilityWorldOnly(page, extension.isolated)
 })
 
 test('Playwright locators pierce a closed root created from the isolated evaluator', async ({
@@ -88,9 +105,9 @@ test('Playwright locators pierce a closed root created from the isolated evaluat
   expect(
     await extension.isolated.evaluate(() => document.querySelector('#host')!.shadowRoot)
   ).toBeNull()
-  await assertBridgeHidden(page, extension.isolated)
+  await assertGetterIsUtilityWorldOnly(page, extension.isolated)
 })
-test('Playwright utility bridge is installed in pages created after harness startup', async ({
+test('Juggler installs the getter in pages created after harness startup', async ({
   page,
   extension
 }) => {
@@ -103,5 +120,5 @@ test('Playwright utility bridge is installed in pages created after harness star
   const isolated = extension.isolatedContexts.get(laterPage)
   await expect(laterPage.locator('#host >> css=span')).toHaveText('later page')
   expect(await laterPage.locator('#host').evaluate((host) => host.shadowRoot)).toBeNull()
-  await assertBridgeHidden(laterPage, isolated)
+  await assertGetterIsUtilityWorldOnly(laterPage, isolated)
 })
