@@ -12,10 +12,11 @@ const legacyClosedShadowGetterName = '__openpolyfillClosedShadowRootForPlaywrigh
 const frameTreePath = 'chrome/juggler/content/content/FrameTree.js'
 const targetRegistryPath = 'chrome/juggler/content/TargetRegistry.js'
 const pageHandlerPath = 'chrome/juggler/content/protocol/PageHandler.js'
+const pageAgentPath = 'chrome/juggler/content/content/PageAgent.js'
 const popupRegistryMarker = '// --- Firefox Addon Playwright Popup Page Targets v3 ---'
 const previousPopupRegistryMarkers = [
   '// --- Firefox Addon Playwright Popup Page Targets v2 ---',
-  '// --- Firefox Addon Playwright Popup Page Targets ---',
+  '// --- Firefox Addon Playwright Popup Page Targets ---'
 ]
 const popupPageTargetMarker = '// --- Firefox Addon Playwright Popup PageTarget behavior ---'
 const previousPopupPageHandlerMarkers = [
@@ -33,8 +34,25 @@ const previousPopupPageHandlerMarkers = [
   '// --- Firefox Addon Playwright Popup Page v8 ---',
   '// --- Firefox Addon Playwright Popup Page v9 ---',
   '// --- Firefox Addon Playwright Popup Page v10 ---',
+  '// --- Firefox Addon Playwright Popup Page v11 ---',
+  '// --- Firefox Addon Playwright Popup Page v12 ---',
+  '// --- Firefox Addon Playwright Popup Page v13 ---',
+  '// --- Firefox Addon Playwright Popup Page v14 ---',
+  '// --- Firefox Addon Playwright Popup Page v15 ---',
+  '// --- Firefox Addon Playwright Popup Page v16 ---',
+  '// --- Firefox Addon Playwright Popup Page v17 ---',
+  '// --- Firefox Addon Playwright Popup Page v18 ---',
+  '// --- Firefox Addon Playwright Popup Page v19 ---'
 ]
-const popupPageHandlerMarker = '// --- Firefox Addon Playwright Popup Page v11 ---'
+const previousPopupPageAgentMarkers = [
+  '// --- Firefox Addon Playwright Popup mouse agent v1 ---',
+  '// --- Firefox Addon Playwright Popup mouse agent v2 ---',
+  '// --- Firefox Addon Playwright Popup mouse agent v3 ---',
+  '// --- Firefox Addon Playwright Popup mouse agent v4 ---',
+  '// --- Firefox Addon Playwright Popup mouse agent v5 ---'
+]
+const popupPageHandlerMarker = '// --- Firefox Addon Playwright Popup Page v20 ---'
+const popupPageAgentMarker = '// --- Firefox Addon Playwright Popup mouse agent v6 ---'
 const frameTreeContextCreation = `    const world = this._runtime.createExecutionContext(this.domWindow(), sandbox, {
       frameId: this.id(),
       name,
@@ -120,8 +138,7 @@ function replaceWithMarker(
 ): string {
   const markerCount = countOccurrences(content, marker)
   if (markerCount === 1) return content
-  if (markerCount !== 0)
-    throw new Error(`Incompatible partial popup Page patch in ${file}`)
+  if (markerCount !== 0) throw new Error(`Incompatible partial popup Page patch in ${file}`)
   return replaceExactlyOnce(content, original, replacement, file)
 }
 
@@ -171,7 +188,7 @@ function patchPopupTargetRegistry(content: string, file: string): string {
       };
       panel.addEventListener('popuphidden', onPopupHidden);
     };`
-  const previousRegistrationMarkers = previousPopupRegistryMarkers.filter(marker =>
+  const previousRegistrationMarkers = previousPopupRegistryMarkers.filter((marker) =>
     countOccurrences(patched, marker)
   )
   const oldRegistrationCount = previousRegistrationMarkers.reduce(
@@ -179,7 +196,11 @@ function patchPopupTargetRegistry(content: string, file: string): string {
     0
   )
   const currentRegistrationCount = countOccurrences(patched, popupRegistryMarker)
-  if (oldRegistrationCount > 1 || currentRegistrationCount > 1 || (oldRegistrationCount && currentRegistrationCount))
+  if (
+    oldRegistrationCount > 1 ||
+    currentRegistrationCount > 1 ||
+    (oldRegistrationCount && currentRegistrationCount)
+  )
     throw new Error(`Incompatible popup Page target patch state in ${file}`)
   if (oldRegistrationCount === 1) {
     const oldMarker = previousRegistrationMarkers[0]
@@ -278,7 +299,12 @@ function patchPopupTargetRegistry(content: string, file: string): string {
   if (currentPopupViewportCount > 1)
     throw new Error(`Incompatible popup Page viewport patch state in ${file}`)
   if (currentPopupViewportCount === 1)
-    patched = replaceExactlyOnce(patched, currentPopupViewportSizeBlock, popupViewportSizeBlock, file)
+    patched = replaceExactlyOnce(
+      patched,
+      currentPopupViewportSizeBlock,
+      popupViewportSizeBlock,
+      file
+    )
 
   const popupActivationFocusBlocks = [
     `  this._window.focus();
@@ -291,8 +317,7 @@ function patchPopupTargetRegistry(content: string, file: string): string {
   ]
   for (const focusBlock of popupActivationFocusBlocks) {
     const count = countOccurrences(patched, focusBlock)
-    if (count > 1)
-      throw new Error(`Incompatible popup Page activation patch state in ${file}`)
+    if (count > 1) throw new Error(`Incompatible popup Page activation patch state in ${file}`)
     if (count === 1) patched = replaceExactlyOnce(patched, focusBlock, '  return callback();', file)
   }
 
@@ -343,27 +368,189 @@ PageTarget.prototype.updateViewportSize = async function() {
 };
 
 ${prototypeAnchor}`
-  patched = replaceWithMarker(
-    patched,
-    prototypeAnchor,
-    prototypePatch,
-    popupPageTargetMarker,
-    file
-  )
+  patched = replaceWithMarker(patched, prototypeAnchor, prototypePatch, popupPageTargetMarker, file)
   return patched
 }
 
+function patchPopupPageAgent(content: string, file: string): string {
+  const markerCount = countOccurrences(content, popupPageAgentMarker)
+  const previousMarkerCount = previousPopupPageAgentMarkers.reduce(
+    (count, marker) => count + countOccurrences(content, marker),
+    0
+  )
+  const previousMarker =
+    previousPopupPageAgentMarkers.find((marker) => countOccurrences(content, marker)) ?? ''
+  const previousRoute = 'dispatchPopupMouseEvent: this._dispatchPopupMouseEvent.bind(this),'
+  const previousRouteCount = countOccurrences(content, previousRoute)
+  const dragRoute = 'dispatchDragEvent: this._dispatchDragEvent.bind(this),'
+  const popupDragRoute = 'dispatchDragEvent: this._dispatchPopupMouseEvent.bind(this),'
+  const dragRouteCount = countOccurrences(content, dragRoute)
+  const popupDragRouteCount = countOccurrences(content, popupDragRoute)
+  if (
+    markerCount > 1 ||
+    previousMarkerCount > 1 ||
+    (markerCount && previousMarkerCount) ||
+    previousRouteCount > 1 ||
+    dragRouteCount > 1 ||
+    popupDragRouteCount > 1
+  )
+    throw new Error(`Incompatible popup mouse agent patch state in ${file}`)
+  if (markerCount === 1) {
+    if (previousRouteCount || dragRouteCount || popupDragRouteCount !== 1)
+      throw new Error(`Incomplete popup mouse agent patch in ${file}`)
+    return content
+  }
+
+  const methodAnchor = '  async _dispatchDragEvent({type, x, y, modifiers}) {'
+  const method = `  ${popupPageAgentMarker}
+  async _dispatchPopupMouseEvent({type, x, y, button = 0, clickCount = 0, modifiers = 0, buttons = 0}) {
+    if (!['mousedown', 'mousemove', 'mouseup'].includes(type))
+      return this._dispatchDragEvent({ type, x, y, modifiers });
+    const win = this._frameTree.mainFrame().domWindow();
+    const target = win.document.elementFromPoint(x, y) || win.document.documentElement;
+    const eventOptions = {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      view: win,
+      detail: clickCount,
+      screenX: Math.round(win.mozInnerScreenX + x),
+      screenY: Math.round(win.mozInnerScreenY + y),
+      clientX: x,
+      clientY: y,
+      button,
+      buttons,
+      ctrlKey: !!(modifiers & 2),
+      altKey: !!(modifiers & 1),
+      shiftKey: !!(modifiers & 8),
+      metaKey: !!(modifiers & 4)
+    };
+    const pointerEventTypes = {
+      mousemove: 'pointermove',
+      mousedown: 'pointerdown',
+      mouseup: 'pointerup',
+      mouseover: 'pointerover',
+      mouseout: 'pointerout',
+      mouseenter: 'pointerenter',
+      mouseleave: 'pointerleave',
+      click: 'click',
+      auxclick: 'auxclick',
+      dblclick: 'dblclick'
+    };
+    const dispatch = (eventType, eventTarget = target, detail = clickCount, relatedTarget = null) => {
+      const options = {
+        ...eventOptions,
+        bubbles: !['mouseenter', 'mouseleave'].includes(eventType),
+        detail,
+        relatedTarget
+      };
+      const pointerEventType = pointerEventTypes[eventType];
+      if (pointerEventType) {
+        const pointerOptions = {
+          ...options,
+          pointerId: 1,
+          pointerType: 'mouse',
+          isPrimary: true,
+          width: 1,
+          height: 1,
+          pressure: buttons ? 0.5 : 0,
+          tangentialPressure: 0,
+          tiltX: 0,
+          tiltY: 0,
+          twist: 0,
+          button: eventType === 'mousemove' && buttons === 0 ? -1 : button
+        };
+        win.windowUtils.dispatchDOMEventViaPresShellForTesting(
+          eventTarget,
+          new win.PointerEvent(pointerEventType, pointerOptions)
+        );
+      }
+      return win.windowUtils.dispatchDOMEventViaPresShellForTesting(
+        eventTarget,
+        new win.MouseEvent(eventType, options)
+      );
+    };
+    if (type === 'mousemove') {
+      const previousTarget = this._popupMouseLastTarget;
+      if (previousTarget !== target) {
+        const ancestors = element => {
+          const result = [];
+          for (let current = element; current; current = current.parentElement)
+            result.push(current);
+          return result;
+        };
+        const previousAncestors = previousTarget ? ancestors(previousTarget) : [];
+        const targetAncestors = ancestors(target);
+        while (
+          previousAncestors.length &&
+          targetAncestors.length &&
+          previousAncestors[previousAncestors.length - 1] === targetAncestors[targetAncestors.length - 1]
+        ) {
+          previousAncestors.pop();
+          targetAncestors.pop();
+        }
+        if (previousTarget) {
+          dispatch('mouseout', previousTarget, 0, target);
+          for (const ancestor of previousAncestors)
+            dispatch('mouseleave', ancestor, 0, target);
+        }
+        dispatch('mouseover', target, 0, previousTarget);
+        for (const ancestor of targetAncestors.reverse())
+          dispatch('mouseenter', ancestor, 0, previousTarget);
+        this._popupMouseLastTarget = target;
+      }
+      return dispatch(type);
+    }
+    return dispatch(type);
+  }
+
+`
+  if (previousMarkerCount === 1) {
+    let patched = content
+    if (previousMarker === previousPopupPageAgentMarkers[0]) {
+      if (previousRouteCount !== 1 || dragRouteCount !== 1 || popupDragRouteCount)
+        throw new Error(`Incompatible popup mouse agent patch state in ${file}`)
+      patched = replaceExactlyOnce(
+        patched,
+        `        ${previousRoute}
+`,
+        '',
+        file
+      )
+      patched = replaceExactlyOnce(patched, dragRoute, popupDragRoute, file)
+    } else if (previousRouteCount || dragRouteCount || popupDragRouteCount !== 1) {
+      throw new Error(`Incompatible popup mouse agent patch state in ${file}`)
+    }
+    const markerIndex = patched.indexOf(previousMarker)
+    const methodIndex = patched.indexOf(methodAnchor, markerIndex)
+    const methodStart = patched.lastIndexOf('\n', markerIndex) + 1
+    if (markerIndex < 0 || methodIndex < 0 || methodStart < 0)
+      throw new Error(`Incompatible popup mouse agent method in ${file}`)
+    return patched.slice(0, methodStart) + method + patched.slice(methodIndex)
+  }
+
+  if (previousRouteCount || dragRouteCount !== 1 || popupDragRouteCount)
+    throw new Error(`Incompatible popup mouse agent route in ${file}`)
+  const patched = replaceExactlyOnce(content, dragRoute, popupDragRoute, file)
+  const methodIndex = patched.indexOf(methodAnchor)
+  if (methodIndex < 0) throw new Error(`Incompatible popup mouse agent method in ${file}`)
+  return patched.slice(0, methodIndex) + method + patched.slice(methodIndex)
+}
 
 function patchPopupPageHandler(content: string, file: string): string {
   const currentMarkerCount = countOccurrences(content, popupPageHandlerMarker)
-  const previousMarkers = previousPopupPageHandlerMarkers.filter(marker =>
+  const previousMarkers = previousPopupPageHandlerMarkers.filter((marker) =>
     countOccurrences(content, marker)
   )
   const previousMarkerCount = previousMarkers.reduce(
     (count, marker) => count + countOccurrences(content, marker),
     0
   )
-  if (currentMarkerCount > 1 || previousMarkerCount > 1 || (currentMarkerCount && previousMarkerCount))
+  if (
+    currentMarkerCount > 1 ||
+    previousMarkerCount > 1 ||
+    (currentMarkerCount && previousMarkerCount)
+  )
     throw new Error(`Incompatible popup Page handler patch state in ${file}`)
   if (currentMarkerCount === 1) return content
   const previousMarker = previousMarkers[0]
@@ -383,54 +570,37 @@ PageHandler.prototype['Page.reload'] = async function() {
 };
 const originalPopupDispatchMouseEvent = PageHandler.prototype['Page.dispatchMouseEvent'];
 PageHandler.prototype['Page.dispatchMouseEvent'] = async function(options) {
-  const { type, x, y, button = 0, modifiers = 0 } = options;
-  if (!this._pageTarget._popupPanel || !['mousedown', 'mousemove', 'mouseup'].includes(type))
+  const { type, x, y, button = 0, clickCount, modifiers = 0, buttons = 0 } = options;
+  if (
+    !this._pageTarget._popupPanel ||
+    !modifiers ||
+    !['mousedown', 'mousemove', 'mouseup'].includes(type)
+  )
     return originalPopupDispatchMouseEvent.call(this, options);
 
   const browser = this._pageTarget._linkedBrowser;
-  const win = this._pageTarget._window;
-  const utils = win.windowUtils;
   browser.scrollRectIntoViewIfNeeded(x, y, 0, 0);
   const bounds = browser.getBoundingClientRect();
   if (x < 0 || y < 0 || x > bounds.width || y > bounds.height)
     return originalPopupDispatchMouseEvent.call(this, options);
 
-  let nativeModifiers = 0;
-  if (modifiers & 1)
-    nativeModifiers |= utils.NATIVE_MODIFIER_ALT_LEFT;
-  if (modifiers & 2)
-    nativeModifiers |= utils.NATIVE_MODIFIER_CONTROL_LEFT;
-  if (modifiers & 4)
-    nativeModifiers |= utils.NATIVE_MODIFIER_SHIFT_LEFT;
-  if (modifiers & 8)
-    nativeModifiers |= utils.NATIVE_MODIFIER_COMMAND_LEFT;
-
-  const resolution = utils.getResolution();
-  const devicePixelRatio = win.devicePixelRatio;
-  const screenX = Math.round(((bounds.left + x) * resolution + win.mozInnerScreenX) * devicePixelRatio);
-  const screenY = Math.round(((bounds.top + y) * resolution + win.mozInnerScreenY) * devicePixelRatio);
-  const sendNativeMouseEvent = eventType => new Promise(resolve => {
-    const nativeMessage = eventType === 'mousedown'
-      ? utils.NATIVE_MOUSE_MESSAGE_BUTTON_DOWN
-      : eventType === 'mouseup'
-        ? utils.NATIVE_MOUSE_MESSAGE_BUTTON_UP
-        : utils.NATIVE_MOUSE_MESSAGE_MOVE;
-    utils.sendNativeMouseEvent(
-      screenX,
-      screenY,
-      nativeMessage,
+  const sendMouseEvent = async eventType => {
+    await this._contentPage.send('dispatchDragEvent', {
+      type: eventType,
+      x,
+      y,
       button,
-      nativeModifiers,
-      this._pageTarget._popupPanel,
-      resolve
-    );
-  });
+      clickCount,
+      modifiers,
+      buttons
+    });
+  };
 
   return this._pageTarget.activateAndRun(async () => {
     this._pageTarget.ensureContextMenuClosed();
     if (type === 'mousedown') {
       if (!this._isDragging)
-        await sendNativeMouseEvent(type);
+        await sendMouseEvent(type);
       return;
     }
 
@@ -447,7 +617,7 @@ PageHandler.prototype['Page.dispatchMouseEvent'] = async function(options) {
         ['dragstart', 'juggler-drag-finalized'],
         this._pendingEventWatchers
       );
-      await sendNativeMouseEvent(type);
+      await sendMouseEvent(type);
       if (watcher.hasEvent('dragstart')) {
         const eventObject = await watcher.ensureEvent('juggler-drag-finalized');
         this._isDragging = eventObject.dragSessionStarted;
@@ -465,9 +635,10 @@ PageHandler.prototype['Page.dispatchMouseEvent'] = async function(options) {
       this._isDragging = false;
       return;
     }
-    await sendNativeMouseEvent(type);
+    await sendMouseEvent(type);
   }, { muteNotificationsPopup: true });
 };
+
 
 `
 }
@@ -513,21 +684,24 @@ async function verifyClosedShadowSupport(): Promise<void> {
   const frameTree = zip.file(frameTreePath)
   const targetRegistry = zip.file(targetRegistryPath)
   const pageHandler = zip.file(pageHandlerPath)
+  const pageAgent = zip.file(pageAgentPath)
   const sourceInFirefox = frameTree ? await frameTree.async('string') : ''
   const targetRegistrySource = targetRegistry ? await targetRegistry.async('string') : ''
   const pageHandlerSource = pageHandler ? await pageHandler.async('string') : ''
+  const pageAgentSource = pageAgent ? await pageAgent.async('string') : ''
   if (
     countOccurrences(sourceInFirefox, frameTreeGetterPatch) !== 1 ||
     countOccurrences(targetRegistrySource, popupRegistryMarker) !== 1 ||
     countOccurrences(targetRegistrySource, popupPageTargetMarker) !== 1 ||
-    countOccurrences(pageHandlerSource, popupPageHandlerMarker) !== 1
+    countOccurrences(pageHandlerSource, popupPageHandlerMarker) !== 1 ||
+    countOccurrences(pageAgentSource, popupPageAgentMarker) !== 1
   ) {
     throw new Error(
-      `Playwright Firefox is not patched for popup Pages: omni.ja:${targetRegistryPath} and ${pageHandlerPath}`
+      `Playwright Firefox is not patched for popup Pages: omni.ja:${targetRegistryPath}, ${pageHandlerPath}, and ${pageAgentPath}`
     )
+  }
 }
 
-}
 function patchFrameTreeGetter(content: string, file: string): string {
   const currentCount = countOccurrences(content, frameTreeGetterPatch)
   const legacyCount = countOccurrences(content, legacyFrameTreeGetterPatch)
@@ -569,6 +743,7 @@ async function patchFirefoxInstallation(): Promise<void> {
   const frameTree = zip.file(frameTreePath)
   const targetRegistry = zip.file(targetRegistryPath)
   const pageHandler = zip.file(pageHandlerPath)
+  const pageAgent = zip.file(pageAgentPath)
   if (!addon || !juggler || !frameTree || !targetRegistry || !pageHandler)
     throw new Error(
       `Incompatible Playwright Firefox build: omni.ja is missing ${
@@ -583,17 +758,21 @@ async function patchFirefoxInstallation(): Promise<void> {
                 : pageHandlerPath
       }`
     )
+  if (!pageAgent)
+    throw new Error(`Incompatible Playwright Firefox build: omni.ja is missing ${pageAgentPath}`)
   const addonBefore = await addon.async('string')
   const jugglerBefore = await juggler.async('string')
   const frameTreeBefore = await frameTree.async('string')
   const targetRegistryBefore = await targetRegistry.async('string')
   const pageHandlerBefore = await pageHandler.async('string')
+  const pageAgentBefore = await pageAgent.async('string')
   const frameTreeSource = patchFrameTreeGetter(frameTreeBefore, `omni.ja:${frameTreePath}`)
   const targetRegistrySource = patchPopupTargetRegistry(
     targetRegistryBefore,
     `omni.ja:${targetRegistryPath}`
   )
   const pageHandlerSource = patchPopupPageHandler(pageHandlerBefore, `omni.ja:${pageHandlerPath}`)
+  const pageAgentSource = patchPopupPageAgent(pageAgentBefore, `omni.ja:${pageAgentPath}`)
   const markerCount = countOccurrences(cfg, PATCH_MARKER)
   const prefNeedle = 'lockPref("marionette.running", true);'
   const prefCount = countOccurrences(cfg, prefNeedle)
@@ -616,11 +795,13 @@ async function patchFirefoxInstallation(): Promise<void> {
     if (
       frameTreeSource !== frameTreeBefore ||
       targetRegistrySource !== targetRegistryBefore ||
-      pageHandlerSource !== pageHandlerBefore
+      pageHandlerSource !== pageHandlerBefore ||
+      pageAgentSource !== pageAgentBefore
     ) {
       zip.file(frameTreePath, frameTreeSource)
       zip.file(targetRegistryPath, targetRegistrySource)
       zip.file(pageHandlerPath, pageHandlerSource)
+      zip.file(pageAgentPath, pageAgentSource)
       await writeOmniArchive(zip, omniPath)
     }
     return
@@ -642,6 +823,7 @@ async function patchFirefoxInstallation(): Promise<void> {
   zip.file(frameTreePath, frameTreeSource)
   zip.file(targetRegistryPath, targetRegistrySource)
   zip.file(pageHandlerPath, pageHandlerSource)
+  zip.file(pageAgentPath, pageAgentSource)
 
   const suffix = `\n${PATCH_MARKER}\nlockPref("marionette.running", true);\n// --- End Firefox Addon Playwright Harness ---\n`
   const cfgTmp = `${cfgPath}.tmp-${process.pid}`
