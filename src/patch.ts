@@ -13,46 +13,21 @@ const frameTreePath = 'chrome/juggler/content/content/FrameTree.js'
 const targetRegistryPath = 'chrome/juggler/content/TargetRegistry.js'
 const pageHandlerPath = 'chrome/juggler/content/protocol/PageHandler.js'
 const pageAgentPath = 'chrome/juggler/content/content/PageAgent.js'
-const popupRegistryMarker = '// --- Firefox Addon Playwright Popup Page Targets v3 ---'
-const previousPopupRegistryMarkers = [
-  '// --- Firefox Addon Playwright Popup Page Targets v2 ---',
-  '// --- Firefox Addon Playwright Popup Page Targets ---'
-]
-const popupPageTargetMarker = '// --- Firefox Addon Playwright Popup PageTarget behavior ---'
-const previousPopupPageHandlerMarkers = [
-  '// --- Firefox Addon Playwright Popup Page input and lifecycle v7 ---',
-  '// --- Firefox Addon Playwright Popup Page lifecycle v3 ---',
-  '// --- Firefox Addon Playwright Popup Page behaviors v2 ---',
-  '// --- Firefox Addon Playwright Popup Page reload ---',
-  '// --- Firefox Addon Playwright Popup Page v1 ---',
-  '// --- Firefox Addon Playwright Popup Page v2 ---',
-  '// --- Firefox Addon Playwright Popup Page v3 ---',
-  '// --- Firefox Addon Playwright Popup Page v4 ---',
-  '// --- Firefox Addon Playwright Popup Page v5 ---',
-  '// --- Firefox Addon Playwright Popup Page v6 ---',
-  '// --- Firefox Addon Playwright Popup Page v7 ---',
-  '// --- Firefox Addon Playwright Popup Page v8 ---',
-  '// --- Firefox Addon Playwright Popup Page v9 ---',
-  '// --- Firefox Addon Playwright Popup Page v10 ---',
-  '// --- Firefox Addon Playwright Popup Page v11 ---',
-  '// --- Firefox Addon Playwright Popup Page v12 ---',
-  '// --- Firefox Addon Playwright Popup Page v13 ---',
-  '// --- Firefox Addon Playwright Popup Page v14 ---',
-  '// --- Firefox Addon Playwright Popup Page v15 ---',
-  '// --- Firefox Addon Playwright Popup Page v16 ---',
-  '// --- Firefox Addon Playwright Popup Page v17 ---',
-  '// --- Firefox Addon Playwright Popup Page v18 ---',
-  '// --- Firefox Addon Playwright Popup Page v19 ---'
-]
-const previousPopupPageAgentMarkers = [
-  '// --- Firefox Addon Playwright Popup mouse agent v1 ---',
-  '// --- Firefox Addon Playwright Popup mouse agent v2 ---',
-  '// --- Firefox Addon Playwright Popup mouse agent v3 ---',
-  '// --- Firefox Addon Playwright Popup mouse agent v4 ---',
-  '// --- Firefox Addon Playwright Popup mouse agent v5 ---'
-]
-const popupPageHandlerMarker = '// --- Firefox Addon Playwright Popup Page v20 ---'
-const popupPageAgentMarker = '// --- Firefox Addon Playwright Popup mouse agent v6 ---'
+const popupRegistryMarker = '// @openpolyfill:popup-registry'
+const legacyPopupRegistryMarkerPattern =
+  /^[ \t]*\/\/ --- Firefox Addon Playwright Popup Page Targets(?: v\d+)? ---$/gm
+const popupPageTargetMarker = '// @openpolyfill:page-target'
+const legacyPopupPageTargetMarker = '// --- Firefox Addon Playwright Popup PageTarget behavior ---'
+const popupPageHandlerMarker = '// @openpolyfill:page-handler'
+const legacyPopupPageHandlerMarkerPattern =
+  /^[ \t]*\/\/ --- Firefox Addon Playwright Popup Page .+ ---$/gm
+const popupPageAgentMarker = '// @openpolyfill:page-agent'
+const legacyPopupPageAgentMarkerPattern =
+  /^[ \t]*\/\/ --- Firefox Addon Playwright Popup mouse agent v(\d+) ---$/gm
+const popupWindowListenerMarker = '// @openpolyfill:window-listener'
+const popupWindowCleanupMarker = '// @openpolyfill:window-cleanup'
+const popupPageConstructorMarker = '// @openpolyfill:page-constructor'
+const popupPageHostMarker = '// @openpolyfill:page-host'
 const frameTreeContextCreation = `    const world = this._runtime.createExecutionContext(this.domWindow(), sandbox, {
       frameId: this.id(),
       name,
@@ -134,11 +109,16 @@ function replaceWithMarker(
   original: string,
   replacement: string,
   marker: string,
-  file: string
+  file: string,
+  previousMarker?: string
 ): string {
   const markerCount = countOccurrences(content, marker)
+  const previousMarkerCount = previousMarker ? countOccurrences(content, previousMarker) : 0
+  if (markerCount > 1 || previousMarkerCount > 1 || (markerCount && previousMarkerCount))
+    throw new Error(`Incompatible popup patch marker state in ${file}`)
   if (markerCount === 1) return content
-  if (markerCount !== 0) throw new Error(`Incompatible partial popup Page patch in ${file}`)
+  if (previousMarker && previousMarkerCount === 1)
+    return replaceExactlyOnce(content, previousMarker, marker, file)
   return replaceExactlyOnce(content, original, replacement, file)
 }
 
@@ -188,30 +168,25 @@ function patchPopupTargetRegistry(content: string, file: string): string {
       };
       panel.addEventListener('popuphidden', onPopupHidden);
     };`
-  const previousRegistrationMarkers = previousPopupRegistryMarkers.filter((marker) =>
-    countOccurrences(patched, marker)
-  )
-  const oldRegistrationCount = previousRegistrationMarkers.reduce(
-    (count, marker) => count + countOccurrences(patched, marker),
-    0
+  const previousRegistrationMarkers = Array.from(
+    patched.matchAll(legacyPopupRegistryMarkerPattern),
+    (match) => match[0]
   )
   const currentRegistrationCount = countOccurrences(patched, popupRegistryMarker)
   if (
-    oldRegistrationCount > 1 ||
+    previousRegistrationMarkers.length > 1 ||
     currentRegistrationCount > 1 ||
-    (oldRegistrationCount && currentRegistrationCount)
+    (previousRegistrationMarkers.length && currentRegistrationCount)
   )
     throw new Error(`Incompatible popup Page target patch state in ${file}`)
-  if (oldRegistrationCount === 1) {
-    const oldMarker = previousRegistrationMarkers[0]
-    if (!oldMarker) throw new Error(`Missing previous popup Page marker in ${file}`)
-    const oldMarkerIndex = patched.indexOf(oldMarker)
-    const start = patched.lastIndexOf(registrationAnchor, oldMarkerIndex)
-    const end = patched.indexOf(`    const onOpenWindow = async (appWindow) => {`, oldMarkerIndex)
-    if (start < 0 || end < 0)
-      throw new Error(`Incompatible older popup Page target patch in ${file}`)
+  if (previousRegistrationMarkers.length || currentRegistrationCount) {
+    const marker = previousRegistrationMarkers[0] ?? popupRegistryMarker
+    const markerIndex = patched.indexOf(marker)
+    const start = patched.lastIndexOf(registrationAnchor, markerIndex)
+    const end = patched.indexOf(`    const onOpenWindow = async (appWindow) => {`, markerIndex)
+    if (start < 0 || end < 0) throw new Error(`Incompatible popup Page target patch in ${file}`)
     patched = patched.slice(0, start) + registrationPatch + `\n\n` + patched.slice(end)
-  } else if (!currentRegistrationCount) {
+  } else {
     patched = replaceExactlyOnce(patched, registrationAnchor, registrationPatch, file)
   }
 
@@ -220,14 +195,15 @@ function patchPopupTargetRegistry(content: string, file: string): string {
     patched,
     windowListenerAnchor,
     `${windowListenerAnchor}
-        helper.addEventListener(domWindow.document, 'WebExtPopupLoaded', event => onExtensionPopupLoaded(domWindow, event)), // popup Page lifecycle`,
-    'popup Page lifecycle',
-    file
+        helper.addEventListener(domWindow.document, 'WebExtPopupLoaded', event => onExtensionPopupLoaded(domWindow, event)), ${popupWindowListenerMarker}`,
+    popupWindowListenerMarker,
+    file,
+    '// popup Page lifecycle'
   )
   const closeWindowAnchor = `      helper.removeListeners(listeners);
       for (const tab of domWindow.gBrowser.tabs)`
   const closeWindowPatch = `      helper.removeListeners(listeners);
-      // popup Page window cleanup
+      ${popupWindowCleanupMarker}
       for (const target of popupTargetsByWindow.get(domWindow) || [])
         target.dispose();
       popupTargetsByWindow.delete(domWindow);
@@ -236,17 +212,19 @@ function patchPopupTargetRegistry(content: string, file: string): string {
     patched,
     closeWindowAnchor,
     closeWindowPatch,
-    'popup Page window cleanup',
-    file
+    popupWindowCleanupMarker,
+    file,
+    '// popup Page window cleanup'
   )
 
   const constructorAnchor = `  constructor(registry, win, tab, browserContext, opener) {`
   patched = replaceWithMarker(
     patched,
     constructorAnchor,
-    `  constructor(registry, win, tab, browserContext, opener, popupPanel = null) { // popup Page constructor`,
-    'popup Page constructor',
-    file
+    `  constructor(registry, win, tab, browserContext, opener, popupPanel = null) { ${popupPageConstructorMarker}`,
+    popupPageConstructorMarker,
+    file,
+    '// popup Page constructor'
   )
   const previousPopupBrowserAssignment =
     '    this._gBrowser = popupPanel ? { documentGlobal: win } : win.gBrowser;'
@@ -268,9 +246,10 @@ function patchPopupTargetRegistry(content: string, file: string): string {
     browserFieldsAnchor,
     `    this._gBrowser = popupPanel ? { documentGlobal: tab.linkedBrowser.contentWindow } : win.gBrowser;
     this._tab = tab;
-    this._popupPanel = popupPanel; // popup Page host`,
-    'popup Page host',
-    file
+    this._popupPanel = popupPanel; ${popupPageHostMarker}`,
+    popupPageHostMarker,
+    file,
+    '// popup Page host'
   )
 
   const currentPopupViewportSizeBlock = `  const viewportSize = this._viewportSize;
@@ -368,18 +347,22 @@ PageTarget.prototype.updateViewportSize = async function() {
 };
 
 ${prototypeAnchor}`
-  patched = replaceWithMarker(patched, prototypeAnchor, prototypePatch, popupPageTargetMarker, file)
+  patched = replaceWithMarker(
+    patched,
+    prototypeAnchor,
+    prototypePatch,
+    popupPageTargetMarker,
+    file,
+    legacyPopupPageTargetMarker
+  )
   return patched
 }
 
 function patchPopupPageAgent(content: string, file: string): string {
   const markerCount = countOccurrences(content, popupPageAgentMarker)
-  const previousMarkerCount = previousPopupPageAgentMarkers.reduce(
-    (count, marker) => count + countOccurrences(content, marker),
-    0
-  )
-  const previousMarker =
-    previousPopupPageAgentMarkers.find((marker) => countOccurrences(content, marker)) ?? ''
+  const legacyMarkers = Array.from(content.matchAll(legacyPopupPageAgentMarkerPattern))
+  const legacyMarker = legacyMarkers[0]?.[0] ?? ''
+  const legacyVersion = legacyMarkers[0]?.[1]
   const previousRoute = 'dispatchPopupMouseEvent: this._dispatchPopupMouseEvent.bind(this),'
   const previousRouteCount = countOccurrences(content, previousRoute)
   const dragRoute = 'dispatchDragEvent: this._dispatchDragEvent.bind(this),'
@@ -388,18 +371,13 @@ function patchPopupPageAgent(content: string, file: string): string {
   const popupDragRouteCount = countOccurrences(content, popupDragRoute)
   if (
     markerCount > 1 ||
-    previousMarkerCount > 1 ||
-    (markerCount && previousMarkerCount) ||
+    legacyMarkers.length > 1 ||
+    (markerCount && legacyMarkers.length) ||
     previousRouteCount > 1 ||
     dragRouteCount > 1 ||
     popupDragRouteCount > 1
   )
     throw new Error(`Incompatible popup mouse agent patch state in ${file}`)
-  if (markerCount === 1) {
-    if (previousRouteCount || dragRouteCount || popupDragRouteCount !== 1)
-      throw new Error(`Incomplete popup mouse agent patch in ${file}`)
-    return content
-  }
 
   const methodAnchor = '  async _dispatchDragEvent({type, x, y, modifiers}) {'
   const method = `  ${popupPageAgentMarker}
@@ -422,8 +400,8 @@ function patchPopupPageAgent(content: string, file: string): string {
       buttons,
       ctrlKey: !!(modifiers & 2),
       altKey: !!(modifiers & 1),
-      shiftKey: !!(modifiers & 8),
-      metaKey: !!(modifiers & 4)
+      shiftKey: !!(modifiers & 4),
+      metaKey: !!(modifiers & 8)
     };
     const pointerEventTypes = {
       mousemove: 'pointermove',
@@ -505,30 +483,25 @@ function patchPopupPageAgent(content: string, file: string): string {
   }
 
 `
-  if (previousMarkerCount === 1) {
+
+  if (markerCount || legacyMarker) {
     let patched = content
-    if (previousMarker === previousPopupPageAgentMarkers[0]) {
+    if (legacyVersion === '1') {
       if (previousRouteCount !== 1 || dragRouteCount !== 1 || popupDragRouteCount)
         throw new Error(`Incompatible popup mouse agent patch state in ${file}`)
-      patched = replaceExactlyOnce(
-        patched,
-        `        ${previousRoute}
-`,
-        '',
-        file
-      )
+      patched = replaceExactlyOnce(patched, `        ${previousRoute}\n`, '', file)
       patched = replaceExactlyOnce(patched, dragRoute, popupDragRoute, file)
     } else if (previousRouteCount || dragRouteCount || popupDragRouteCount !== 1) {
       throw new Error(`Incompatible popup mouse agent patch state in ${file}`)
     }
-    const markerIndex = patched.indexOf(previousMarker)
+    const marker = markerCount ? popupPageAgentMarker : legacyMarker
+    const markerIndex = patched.indexOf(marker)
     const methodIndex = patched.indexOf(methodAnchor, markerIndex)
     const methodStart = patched.lastIndexOf('\n', markerIndex) + 1
-    if (markerIndex < 0 || methodIndex < 0 || methodStart < 0)
+    if (markerIndex < 0 || methodIndex < 0)
       throw new Error(`Incompatible popup mouse agent method in ${file}`)
     return patched.slice(0, methodStart) + method + patched.slice(methodIndex)
   }
-
   if (previousRouteCount || dragRouteCount !== 1 || popupDragRouteCount)
     throw new Error(`Incompatible popup mouse agent route in ${file}`)
   const patched = replaceExactlyOnce(content, dragRoute, popupDragRoute, file)
@@ -538,25 +511,13 @@ function patchPopupPageAgent(content: string, file: string): string {
 }
 
 function patchPopupPageHandler(content: string, file: string): string {
-  const currentMarkerCount = countOccurrences(content, popupPageHandlerMarker)
-  const previousMarkers = previousPopupPageHandlerMarkers.filter((marker) =>
-    countOccurrences(content, marker)
-  )
-  const previousMarkerCount = previousMarkers.reduce(
-    (count, marker) => count + countOccurrences(content, marker),
-    0
-  )
-  if (
-    currentMarkerCount > 1 ||
-    previousMarkerCount > 1 ||
-    (currentMarkerCount && previousMarkerCount)
-  )
+  const markerCount = countOccurrences(content, popupPageHandlerMarker)
+  const legacyMarkers = Array.from(content.matchAll(legacyPopupPageHandlerMarkerPattern))
+  if (markerCount > 1 || legacyMarkers.length > 1 || (markerCount && legacyMarkers.length))
     throw new Error(`Incompatible popup Page handler patch state in ${file}`)
-  if (currentMarkerCount === 1) return content
-  const previousMarker = previousMarkers[0]
-  const base = previousMarker
-    ? content.slice(0, content.indexOf(previousMarker)).trimEnd()
-    : content
+  const previousMarker = legacyMarkers[0]?.[0] ?? ''
+  const marker = markerCount ? popupPageHandlerMarker : previousMarker
+  const base = marker ? content.slice(0, content.indexOf(marker)).trimEnd() : content
   return `${base}
 
 ${popupPageHandlerMarker}

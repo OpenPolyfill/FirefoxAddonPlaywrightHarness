@@ -7,7 +7,7 @@ import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
 import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
 import { FirefoxRdpSession, RdpEvaluation } from './rdp.js'
 import { RdpIsolatedNamespace } from './isolated.js'
- 
+
 import type {
   FirefoxExtension,
   FirefoxHarnessConfig,

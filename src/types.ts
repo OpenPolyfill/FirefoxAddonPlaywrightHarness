@@ -58,7 +58,6 @@ export interface FirefoxIsolatedContexts {
 
 export type FirefoxIsolated = FirefoxIsolatedPage
 
-
 export interface FirefoxExtension {
   readonly id: string
   readonly background?: FirefoxBackground
