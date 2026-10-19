@@ -20,6 +20,9 @@ returns the popup's actual Playwright page. It is included in
 `page.context().pages()` and supports normal page locators, evaluation,
 screenshots, events, and close lifecycle.
 
+In headless Firefox, modifier keys held during popup mouse input are preserved
+on the trusted mouse and pointer events.
+
 ## Page actions
 
 Page actions are activated against the specified page:

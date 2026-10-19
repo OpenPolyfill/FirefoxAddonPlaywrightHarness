@@ -12,7 +12,6 @@ npm install @openpolyfill/firefox-addon-playwright-harness @playwright/test
 npx playwright install firefox
 ```
 
-
 Requirements:
 
 - Node.js 20 or newer.
