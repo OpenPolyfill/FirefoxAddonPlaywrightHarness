@@ -21,19 +21,12 @@ Extensions without a background page or worker install normally; `extension.back
 
 ## Installation
 
-The package depends on `@openpolyfill/firefox-rdp`, which is published to GitHub Packages. Configure the scope registry and authenticate with a GitHub token that has `read:packages`:
+Install the package and its Firefox RDP dependency from the public npm registry:
 
 ```sh
-cat > .npmrc <<'EOF'
-@openpolyfill:registry=https://npm.pkg.github.com
-EOF
-
-npm login --scope=@openpolyfill --auth-type=legacy --registry=https://npm.pkg.github.com
 npm install @openpolyfill/firefox-addon-playwright-harness @playwright/test
 npx playwright install firefox
 ```
-
-Use a GitHub personal access token (classic) with `read:packages` when npm asks for the password. Do not commit credentials or a token-bearing `.npmrc`. In CI, provide `NODE_AUTH_TOKEN` through the runner's secret store.
 
 Requirements:
 

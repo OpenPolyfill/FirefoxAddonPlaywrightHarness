@@ -7,7 +7,7 @@
     "node": ">=20"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public"
   },
   "license": "MPL-2.0",
   "main": "dist/index.js",
@@ -59,7 +59,7 @@
   },
   "dependencies": {
     "@openpolyfill/firefox-rdp": "^0.1.0",
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.2"
   },
   "peerDependencies": {
     "@playwright/test": ">=1.40"

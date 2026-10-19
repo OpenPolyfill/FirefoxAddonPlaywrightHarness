@@ -5,16 +5,13 @@ description: 'Install the harness, configure Playwright, and create extension fi
 
 ## Install
 
-The package and its RDP dependency are published through GitHub Packages:
+Both the harness and its RDP dependency are available from the public npm registry:
 
 ```sh
-printf '%s\n' '@openpolyfill:registry=https://npm.pkg.github.com' >> .npmrc
-npm login --scope=@openpolyfill --auth-type=legacy --registry=https://npm.pkg.github.com
 npm install @openpolyfill/firefox-addon-playwright-harness @playwright/test
 npx playwright install firefox
 ```
 
-Use a GitHub personal access token (classic) with `read:packages` as the npm password. Keep credentials out of version control. In CI, provide `NODE_AUTH_TOKEN` through the runner's secret store.
 
 Requirements:
 
