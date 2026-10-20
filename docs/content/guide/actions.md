@@ -20,6 +20,15 @@ returns the popup's actual Playwright page. It is included in
 `page.context().pages()` and supports normal page locators, evaluation,
 screenshots, events, and close lifecycle.
 
+For a click-only browser action with no popup, opt out of the popup wait:
+
+```ts
+await extension.activateAction(page, 'browserAction', { waitForPopup: false })
+```
+
+This still invokes Firefox's browser action trigger. The option only changes whether
+the harness waits for an extension popup page.
+
 In headless Firefox, modifier keys held during popup mouse input are preserved
 on the trusted mouse and pointer events.
 
@@ -33,7 +42,8 @@ const popup = await extension.activateAction(page, 'pageAction')
 expect(await popup.opener()).toBe(page)
 ```
 
-Both action methods return a `Page` associated with the owning browser context.
+By default, both action kinds return a `Page`. The `{ waitForPopup: false }` option
+returns `void` after triggering the action.
 
 ## Waiting and closing
 

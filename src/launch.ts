@@ -186,9 +186,19 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     })
   }
 
-  async activateAction(page: Page, kind: ActionKind = 'browserAction'): Promise<Page> {
+  activateAction(page: Page, kind?: ActionKind): Promise<Page>
+  activateAction(page: Page, kind: ActionKind, options: { waitForPopup: false }): Promise<void>
+  async activateAction(
+    page: Page,
+    kind: ActionKind = 'browserAction',
+    options: { waitForPopup?: boolean } = {}
+  ): Promise<Page | void> {
     if (this.closed) throw new Error('Extension harness is closed')
-    const baseUrl = await this.getExtensionBaseUrl()
+    const popup =
+      options.waitForPopup === false
+        ? undefined
+        : this.waitForPopupPage(await this.getExtensionBaseUrl(), 15_000)
+    popup?.catch(() => undefined)
     await page.bringToFront()
     const chrome = this.session.chromeTarget
     if (!chrome)
@@ -196,8 +206,6 @@ class FirefoxExtensionHandle implements FirefoxExtension {
         'Firefox RDP did not expose the parent chrome target for extension action activation'
       )
     const chromeEvaluation = new RdpEvaluation(this.session.rdp, chrome.console())
-    const popup = this.waitForPopupPage(baseUrl, 15_000)
-    popup.catch(() => undefined)
     if (kind === 'pageAction') {
       await chromeEvaluation.evaluate(`(async () => {
         const action = PageActions.actions.find(action => action.extensionID === ${JSON.stringify(this.id)})
@@ -220,7 +228,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
         action.triggerAction(window)
       })()`)
     }
-    return popup
+    if (popup) return popup
   }
 
   async waitForPopup(options: { timeout?: number } = {}): Promise<Page> {

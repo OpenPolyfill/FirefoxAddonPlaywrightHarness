@@ -20,7 +20,7 @@ The `extension` fixture exposes:
 - `background` — evaluator for the extension background context.
 - `isolated` — evaluator bound to the fixture's current `page`.
 - `isolatedContexts.get(page)` — evaluator factory for any explicit Playwright page.
-- `activateAction(page, kind)` — opens a browser or page action popup.
+- `activateAction(page, kind)` — opens an action popup by default. Pass `{ waitForPopup: false }` to trigger a click-only action without waiting for a popup.
 - `waitForPopup()` — waits for an extension popup target.
 - `close()` — closes the extension harness.
 

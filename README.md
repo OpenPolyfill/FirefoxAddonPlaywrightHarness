@@ -101,7 +101,7 @@ The `extension` fixture includes:
 - `background` — evaluator for the extension background context.
 - `isolated` — evaluator bound to the current fixture `page`.
 - `isolatedContexts.get(page)` — evaluator factory for another Playwright page.
-- `activateAction(page, kind)` and `waitForPopup()` — popup helpers.
+- `activateAction(page, kind)` and `waitForPopup()` — popup helpers. Pass `{ waitForPopup: false }` when triggering an action without waiting for a popup.
 - `id`, `installPath`, and `close()` — extension identity and lifecycle.
 
 `extension.isolated` is bound to the fixture's current `page` and follows that page across navigations. Use `extension.isolatedContexts.get(otherPage)` when the evaluation must target a specific Playwright page:
@@ -123,7 +123,7 @@ const browserPopup = await extension.activateAction(page, 'browserAction')
 const pagePopup = await extension.activateAction(page, 'pageAction')
 ```
 
-`activateAction` brings the specified Playwright page to the foreground, invokes the WebExtension action, and returns an RDP popup wrapper. It does not navigate to the popup URL or return a Playwright `Page`; the popup wrapper works in headless Firefox.
+`activateAction` brings the specified Playwright page to the foreground and invokes the WebExtension action. By default it returns the popup's actual Playwright page. Pass `{ waitForPopup: false }` for click-only actions, which returns `void` after triggering Firefox's action handler without waiting for a popup.
 
 ## Configuration
 

@@ -1,0 +1,8 @@
+{
+  "manifest_version": 2,
+  "name": "No-popup browser action",
+  "version": "1.0",
+  "browser_action": { "default_title": "No-popup action" },
+  "background": { "scripts": ["background.js"] },
+  "permissions": ["tabs"]
+}

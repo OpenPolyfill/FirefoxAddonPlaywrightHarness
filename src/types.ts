@@ -65,6 +65,7 @@ export interface FirefoxExtension {
   readonly isolatedContexts: FirefoxIsolatedContexts
   installPath: string
   activateAction(page: Page, kind?: ActionKind): Promise<Page>
+  activateAction(page: Page, kind: ActionKind, options: { waitForPopup: false }): Promise<void>
   waitForPopup(options?: { timeout?: number }): Promise<Page>
   close(): Promise<void>
 }
