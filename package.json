@@ -1,6 +1,6 @@
 {
   "name": "@openpolyfill/firefox-addon-playwright-harness",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Standalone Playwright Firefox WebExtension harness backed by Firefox RDP",
   "type": "module",
   "engines": {
