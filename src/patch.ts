@@ -14,6 +14,12 @@ const targetRegistryPath = 'chrome/juggler/content/TargetRegistry.js'
 const pageHandlerPath = 'chrome/juggler/content/protocol/PageHandler.js'
 const pageAgentPath = 'chrome/juggler/content/content/PageAgent.js'
 const popupRegistryMarker = '// @openpolyfill:popup-registry'
+const sidebarRegistryMarker = '// @openpolyfill:sidebar-registry'
+const sidebarConstructorMarker = '// @openpolyfill:sidebar-constructor'
+const sidebarHostMarker = '// @openpolyfill:sidebar-host'
+const sidebarPageTargetMarker = '// @openpolyfill:sidebar-target'
+const sidebarWindowCleanupMarker = '// @openpolyfill:sidebar-window-cleanup'
+const sidebarPageHandlerSourceMarker = '// @openpolyfill:sidebar-mouse-offset'
 const previousPopupRegistryMarker = '// --- Firefox Addon Playwright Popup Page Targets v3 ---'
 const popupPageTargetMarker = '// @openpolyfill:page-target'
 const legacyPopupPageTargetMarker = '// --- Firefox Addon Playwright Popup PageTarget behavior ---'
@@ -134,6 +140,60 @@ function patchPopupTargetRegistry(content: string, file: string): string {
   const registrationPatch = `${registrationAnchor}
     ${popupRegistryMarker}
     const popupTargetsByWindow = new Map();
+    ${sidebarRegistryMarker}
+    this.registerExtensionSidebar = (ownerWindow, extensionId) => {
+      const controller = ownerWindow.SidebarController;
+      if (!controller || !controller._box)
+        throw new Error('Firefox SidebarController is unavailable');
+      const entry = [...controller.sidebars.entries()].find(([, sidebar]) => sidebar.extensionId === extensionId);
+      if (!entry)
+        throw new Error('Firefox extension sidebar is not registered');
+      const [commandID] = entry;
+      if (!controller.isOpen || controller.currentID !== commandID)
+        throw new Error('Firefox extension sidebar is not active');
+      const hostBrowser = controller.browser;
+      const browser = hostBrowser.contentDocument?.getElementById('webext-panels-browser');
+      if (!browser || browser.getAttribute('webextension-view-type') !== 'sidebar' || !browser.browsingContext)
+        throw new Error('Firefox extension sidebar inner browser is unavailable');
+      const existing = this._browserToTarget.get(browser);
+      if (existing) {
+        if (existing._sidebarExtensionID === extensionId && existing._sidebarCommandID === commandID)
+          return existing.id();
+        if (existing._sidebarController)
+          existing.dispose();
+        else
+          throw new Error('Firefox extension sidebar browser already has a Juggler target');
+      }
+      const browsingContext = browser.browsingContext;
+      const opener = this._browserToTarget.get(ownerWindow.gBrowser.selectedBrowser);
+      const userContextId = browsingContext.originAttributes.userContextId || 0;
+      const browserContext = opener ? opener.browserContext() : this._userContextIdToBrowserContext.get(userContextId);
+      if (!browserContext)
+        throw new Error('Firefox extension sidebar has no Playwright browser context');
+      const sidebarTab = { linkedBrowser: browser, userContextId };
+      const target = new PageTarget(this, ownerWindow, sidebarTab, browserContext, opener, null, controller, commandID, extensionId);
+      target._sidebarOwnerWindow = ownerWindow;
+      target._sidebarOwnerUnloadListener = () => target.dispose();
+      ownerWindow.addEventListener('unload', target._sidebarOwnerUnloadListener, { once: true });
+      target._sidebarHostBrowser = hostBrowser;
+      const onSidebarChange = () => {
+        const activeBrowser = hostBrowser.contentDocument?.getElementById('webext-panels-browser');
+        if (!controller.isOpen || controller.currentID !== commandID || activeBrowser !== browser)
+          target.dispose();
+      };
+      const observer = new ownerWindow.MutationObserver(onSidebarChange);
+      target._sidebarObserver = observer;
+      observer.observe(controller._box, { attributes: true, attributeFilter: ['hidden'] });
+      const sidebarDocument = browser.ownerDocument;
+      if (sidebarDocument?.documentElement)
+        observer.observe(sidebarDocument.documentElement, { childList: true, subtree: true });
+      const onHostLoad = () => onSidebarChange();
+      target._sidebarHostLoadListener = onHostLoad;
+      hostBrowser.addEventListener('load', onHostLoad, true);
+      target.updateOverridesForBrowsingContext(browsingContext);
+      target.updateViewportSize().catch(error => dump('Sidebar viewport update failed: ' + error + '\\n'));
+      return target.id();
+    };
     const onExtensionPopupLoaded = (ownerWindow, event) => {
       const browser = event.target;
       if (!browser || browser.getAttribute('webextension-view-type') !== 'popup' || this._browserToTarget.has(browser))
@@ -212,6 +272,21 @@ function patchPopupTargetRegistry(content: string, file: string): string {
     file,
     '// popup Page window cleanup'
   )
+  const sidebarWindowCleanupCount = countOccurrences(patched, sidebarWindowCleanupMarker)
+  if (sidebarWindowCleanupCount > 1)
+    throw new Error(`Incompatible sidebar window cleanup patch state in ${file}`)
+  if (sidebarWindowCleanupCount === 1) {
+    patched = replaceExactlyOnce(
+      patched,
+      `      ${sidebarWindowCleanupMarker}
+      for (const target of this._browserToTarget.values())
+        if (target._sidebarOwnerWindow === domWindow)
+          target.dispose();
+      popupTargetsByWindow.delete(domWindow);`,
+      `      popupTargetsByWindow.delete(domWindow);`,
+      file
+    )
+  }
 
   const constructorAnchor = `  constructor(registry, win, tab, browserContext, opener) {`
   patched = replaceWithMarker(
@@ -221,6 +296,14 @@ function patchPopupTargetRegistry(content: string, file: string): string {
     popupPageConstructorMarker,
     file,
     '// popup Page constructor'
+  )
+  const sidebarConstructorAnchor = `  constructor(registry, win, tab, browserContext, opener, popupPanel = null) { ${popupPageConstructorMarker}`
+  patched = replaceWithMarker(
+    patched,
+    sidebarConstructorAnchor,
+    `  constructor(registry, win, tab, browserContext, opener, popupPanel = null, sidebarController = null, sidebarCommandID = null, sidebarExtensionID = null) { ${popupPageConstructorMarker} ${sidebarConstructorMarker}`,
+    sidebarConstructorMarker,
+    file
   )
   const previousPopupBrowserAssignment =
     '    this._gBrowser = popupPanel ? { documentGlobal: win } : win.gBrowser;'
@@ -246,6 +329,23 @@ function patchPopupTargetRegistry(content: string, file: string): string {
     popupPageHostMarker,
     file,
     '// popup Page host'
+  )
+  patched = patchOrVerify(
+    patched,
+    '    this._gBrowser = popupPanel ? { documentGlobal: tab.linkedBrowser.contentWindow } : win.gBrowser;',
+    '    this._gBrowser = (popupPanel || sidebarController) ? { documentGlobal: tab.linkedBrowser.contentWindow } : win.gBrowser;',
+    file
+  )
+  const sidebarHostAnchor = `    this._popupPanel = popupPanel; ${popupPageHostMarker}`
+  patched = replaceWithMarker(
+    patched,
+    sidebarHostAnchor,
+    `${sidebarHostAnchor}
+    this._sidebarController = sidebarController;
+    this._sidebarCommandID = sidebarCommandID;
+    this._sidebarExtensionID = sidebarExtensionID; ${sidebarHostMarker}`,
+    sidebarHostMarker,
+    file
   )
 
   const currentPopupViewportSizeBlock = `  const viewportSize = this._viewportSize;
@@ -311,7 +411,7 @@ const originalPopupClose = PageTarget.prototype.close;
 PageTarget.prototype.close = function(runBeforeUnload = false) {
   if (!this._popupPanel)
     return originalPopupClose.call(this, runBeforeUnload);
-  if (!this._disposed && this._popupPanel.state === 'open')
+  if (!this._disposed && this._popupPanel.state !== 'closed' && this._popupPanel.state !== 'hiding')
     this._popupPanel.hidePopup();
 };
 
@@ -350,6 +450,90 @@ ${prototypeAnchor}`
     popupPageTargetMarker,
     file,
     legacyPopupPageTargetMarker
+  )
+  patched = patchOrVerify(
+    patched,
+    `  if (!this._disposed && this._popupPanel.state === 'open')
+    this._popupPanel.hidePopup();`,
+    `  if (!this._disposed && this._popupPanel.state !== 'closed' && this._popupPanel.state !== 'hiding')
+    this._popupPanel.hidePopup();`,
+    file
+  )
+  const sidebarPrototypeAnchor = `function fromProtocolColorScheme(colorScheme) {`
+  const sidebarPrototypePatch = `${sidebarPageTargetMarker}
+const originalSidebarActivateAndRun = PageTarget.prototype.activateAndRun;
+PageTarget.prototype.activateAndRun = function(callback = () => {}, options = {}) {
+  if (!this._sidebarController)
+    return originalSidebarActivateAndRun.call(this, callback, options);
+  if (
+    this._disposed ||
+    !this._sidebarController.isOpen ||
+    this._sidebarController.currentID !== this._sidebarCommandID
+  )
+    throw new Error('Sidebar page is closed');
+  return callback();
+};
+
+const originalSidebarClose = PageTarget.prototype.close;
+PageTarget.prototype.close = function(runBeforeUnload = false) {
+  if (!this._sidebarController)
+    return originalSidebarClose.call(this, runBeforeUnload);
+  if (this._disposed)
+    return;
+  this._sidebarController.hide({ dismissPanel: true });
+  if (!this._sidebarController.isOpen || this._sidebarController.currentID !== this._sidebarCommandID)
+    this.dispose();
+};
+
+const originalSidebarDispose = PageTarget.prototype.dispose;
+PageTarget.prototype.dispose = function() {
+  if (this._sidebarController && this._disposed)
+    return;
+  if (this._sidebarController) {
+    this._sidebarObserver?.disconnect();
+    this._sidebarObserver = undefined;
+    if (this._sidebarHostBrowser && this._sidebarHostLoadListener)
+      this._sidebarHostBrowser.removeEventListener('load', this._sidebarHostLoadListener, true);
+    if (this._sidebarOwnerWindow && this._sidebarOwnerUnloadListener)
+      this._sidebarOwnerWindow.removeEventListener('unload', this._sidebarOwnerUnloadListener);
+  }
+  return originalSidebarDispose.call(this);
+};
+
+const originalSidebarUpdateViewportSize = PageTarget.prototype.updateViewportSize;
+PageTarget.prototype.updateViewportSize = async function() {
+  if (!this._sidebarController)
+    return originalSidebarUpdateViewportSize.call(this);
+  await waitForWindowReady(this._window);
+  this.updateDPPXOverride();
+  this.updateScreenEmulation();
+  const viewportSize = this._viewportSize;
+  if (viewportSize) {
+    const { width, height } = viewportSize;
+    this._linkedBrowser.style.setProperty('width', width + 'px');
+    this._linkedBrowser.style.setProperty('min-width', width + 'px');
+    this._linkedBrowser.style.setProperty('height', height + 'px');
+    this._linkedBrowser.style.setProperty('min-height', height + 'px');
+  } else {
+    this._linkedBrowser.style.removeProperty('width');
+    this._linkedBrowser.style.removeProperty('min-width');
+    this._linkedBrowser.style.removeProperty('height');
+    this._linkedBrowser.style.removeProperty('min-height');
+  }
+  const actualSize = this._linkedBrowser.getBoundingClientRect();
+  await this._channel.connect('').send('awaitViewportDimensions', {
+    width: actualSize.width / this._zoom,
+    height: actualSize.height / this._zoom,
+  });
+};
+
+${sidebarPrototypeAnchor}`
+  patched = replaceWithMarker(
+    patched,
+    sidebarPrototypeAnchor,
+    sidebarPrototypePatch,
+    sidebarPageTargetMarker,
+    file
   )
   return patched
 }
@@ -509,13 +693,34 @@ function patchPopupPageHandler(content: string, file: string): string {
     throw new Error(`Incompatible popup Page handler patch state in ${file}`)
   const previousMarker = previousMarkers[0] ?? ''
   const marker = markerCount ? popupPageHandlerMarker : previousMarker
-  const base = marker ? content.slice(0, content.indexOf(marker)).trimEnd() : content
+  let base = marker ? content.slice(0, content.indexOf(marker)).trimEnd() : content
+  const sidebarMouseOffsetCount = countOccurrences(base, sidebarPageHandlerSourceMarker)
+  if (sidebarMouseOffsetCount > 1)
+    throw new Error(`Incompatible sidebar mouse offset patch state in ${file}`)
+  if (sidebarMouseOffsetCount === 1) {
+    base = replaceExactlyOnce(
+      base,
+      `      ${sidebarPageHandlerSourceMarker}
+      const sidebarHostBounds = this._pageTarget._sidebarController
+        ? this._pageTarget._sidebarHostBrowser.getBoundingClientRect()
+        : { left: 0, top: 0 };
+      const promises = [];`,
+      `      const promises = [];`,
+      file
+    )
+    base = replaceExactlyOnce(
+      base,
+      '          x + boundingBox.left + sidebarHostBounds.left,\n          y + boundingBox.top + sidebarHostBounds.top,',
+      '          x + boundingBox.left,\n          y + boundingBox.top,',
+      file
+    )
+  }
   return `${base}
 
 ${popupPageHandlerMarker}
 const originalPopupPageReload = PageHandler.prototype['Page.reload'];
 PageHandler.prototype['Page.reload'] = async function() {
-  if (this._pageTarget._popupPanel) {
+  if (this._pageTarget._popupPanel || this._pageTarget._sidebarController) {
     this._pageTarget.linkedBrowser().webNavigation.reload(Ci.nsIWebNavigation.LOAD_FLAGS_NONE);
     return;
   }
@@ -524,9 +729,11 @@ PageHandler.prototype['Page.reload'] = async function() {
 const originalPopupDispatchMouseEvent = PageHandler.prototype['Page.dispatchMouseEvent'];
 PageHandler.prototype['Page.dispatchMouseEvent'] = async function(options) {
   const { type, x, y, button = 0, clickCount, modifiers = 0, buttons = 0 } = options;
+  const isPopup = !!this._pageTarget._popupPanel;
+  const isSidebar = !!this._pageTarget._sidebarController;
   if (
-    !this._pageTarget._popupPanel ||
-    !modifiers ||
+    (!isPopup && !isSidebar) ||
+    (isPopup && !modifiers) ||
     !['mousedown', 'mousemove', 'mouseup'].includes(type)
   )
     return originalPopupDispatchMouseEvent.call(this, options);
@@ -645,12 +852,16 @@ async function verifyClosedShadowSupport(): Promise<void> {
   if (
     countOccurrences(sourceInFirefox, frameTreeGetterPatch) !== 1 ||
     countOccurrences(targetRegistrySource, popupRegistryMarker) !== 1 ||
+    countOccurrences(targetRegistrySource, sidebarRegistryMarker) !== 1 ||
     countOccurrences(targetRegistrySource, popupPageTargetMarker) !== 1 ||
+    countOccurrences(targetRegistrySource, sidebarPageTargetMarker) !== 1 ||
+    countOccurrences(targetRegistrySource, sidebarConstructorMarker) !== 1 ||
+    countOccurrences(targetRegistrySource, sidebarHostMarker) !== 1 ||
     countOccurrences(pageHandlerSource, popupPageHandlerMarker) !== 1 ||
     countOccurrences(pageAgentSource, popupPageAgentMarker) !== 1
   ) {
     throw new Error(
-      `Playwright Firefox is not patched for popup Pages: omni.ja:${targetRegistryPath}, ${pageHandlerPath}, and ${pageAgentPath}`
+      `Playwright Firefox is not patched for popup and sidebar Pages: omni.ja:${targetRegistryPath}, ${pageHandlerPath}, and ${pageAgentPath}`
     )
   }
 }

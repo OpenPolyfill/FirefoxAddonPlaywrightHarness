@@ -1,0 +1,13 @@
+{
+  "manifest_version": 2,
+  "name": "Harness sidebar action",
+  "version": "1.0",
+  "browser_action": {
+    "default_title": "Harness popup",
+    "default_popup": "popup.html"
+  },
+  "sidebar_action": {
+    "default_title": "Harness sidebar",
+    "default_panel": "sidebar.html"
+  }
+}

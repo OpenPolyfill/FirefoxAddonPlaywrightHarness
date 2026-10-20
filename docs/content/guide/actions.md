@@ -1,6 +1,6 @@
 ---
-title: 'Actions and popups'
-description: 'Activate browser actions and page actions and inspect their popup targets.'
+title: 'Actions, sidebars, and popups'
+description: 'Activate browser actions, page actions, and extension sidebars as Playwright pages.'
 ---
 
 ## Browser actions
@@ -44,6 +44,24 @@ expect(await popup.opener()).toBe(page)
 
 By default, both action kinds return a `Page`. The `{ waitForPopup: false }` option
 returns `void` after triggering the action.
+
+## Extension sidebars
+
+For an extension that declares `sidebar_action`, activate the sidebar and use its
+returned page like any other Playwright `Page`:
+
+```ts
+const sidebar = await extension.activateSidebar(page)
+await sidebar.getByRole('textbox', { name: 'Search' }).fill('query')
+```
+
+Firefox hosts extension sidebars in the inner `webext-panels-browser` inside
+`webext-panels.xhtml`. The harness registers that inner browser as the Juggler
+target and returns its actual Playwright page, rather than wrapping the outer
+`SidebarController.browser` host.
+
+`sidebar.close()` hides the Firefox sidebar and closes the Playwright page. Calling
+`activateSidebar(page)` again opens a new page for the sidebar.
 
 ## Waiting and closing
 

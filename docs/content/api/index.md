@@ -14,6 +14,7 @@ See [Generated API](/docs/api/reference) for TypeDoc pages generated from `src/i
 - `extension.isolated` — evaluate in the current fixture page.
 - `extension.isolatedContexts.get(page)` — evaluate in an explicitly selected page.
 - `extension.activateAction(page, kind)` — invoke an action and open its popup. Use `{ waitForPopup: false }` for click-only actions.
+- `extension.activateSidebar(page)` — open the extension sidebar and return its Playwright `Page`.
 - `rdp.root.listTabs()` — access the raw `FirefoxRDP` client from a test.
 
 Start with [Getting started](/docs/guide/getting-started) or [Fixtures and evaluation](/docs/guide/fixtures).

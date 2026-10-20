@@ -20,11 +20,12 @@ The `extension` fixture exposes:
 - `background` — evaluator for the extension background context.
 - `isolated` — evaluator bound to the fixture's current `page`.
 - `isolatedContexts.get(page)` — evaluator factory for any explicit Playwright page.
-- `activateAction(page, kind)` — opens an action popup by default. Pass `{ waitForPopup: false }` to trigger a click-only action without waiting for a popup.
+- `activateAction(page, kind)` — opens an action popup as a Playwright page. Pass `{ waitForPopup: false }` for a click-only action.
 - `waitForPopup()` — waits for an extension popup target.
+- `activateSidebar(page)` — opens the extension sidebar and returns its Playwright page.
 - `close()` — closes the extension harness.
 
-The configured extension is installed directly from its source directory or XPI. Closed-shadow locator support patches Playwright Firefox's Juggler to install a privileged getter in its utility sandbox; it does not add or modify an extension.
+The configured extension is installed directly from its source directory or XPI. Closed-shadow locator support patches Playwright Firefox's Juggler to install a privileged getter in its utility sandbox; sidebar targets bind to Firefox's inner WebExtension panel browser rather than its outer sidebar host.
 
 ## Background evaluation
 

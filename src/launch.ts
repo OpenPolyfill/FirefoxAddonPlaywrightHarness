@@ -138,52 +138,81 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     this.extensionBaseUrl = baseUrl
     return baseUrl
   }
-  private async waitForPopupPage(baseUrl: string, timeout: number): Promise<Page> {
-    return new Promise((resolve, reject) => {
-      const pendingPages = new Map<Page, (frame: Frame) => void>()
-      let settled = false
-      const timeoutId =
-        timeout > 0
-          ? setTimeout(() => {
-              settled = true
-              cleanup()
-              reject(new Error(`Timeout ${timeout}ms exceeded while waiting for popup page`))
-            }, timeout)
-          : undefined
-      const cleanup = () => {
-        clearTimeout(timeoutId)
-        this.browserContext.off('page', onPage)
-        this.browserContext.off('close', onContextClose)
-        for (const [page, listener] of pendingPages) page.off('framenavigated', listener)
-        pendingPages.clear()
-      }
-      const finish = (page: Page) => {
-        if (settled) return
-        settled = true
-        cleanup()
-        resolve(page)
-      }
-      const onContextClose = () => {
-        if (settled) return
-        settled = true
-        cleanup()
-        reject(new Error('Browser context closed while waiting for popup page'))
-      }
-      const onPage = (page: Page) => {
-        if (page.url().startsWith(baseUrl)) {
-          finish(page)
+  private async waitForExtensionPage(
+    url: string,
+    timeout: number,
+    opener?: Page,
+    exactUrl = false
+  ): Promise<Page> {
+    let promise: Promise<Page>
+    let resolve!: (page: Page | PromiseLike<Page>) => void
+    let reject!: (reason?: unknown) => void
+    if (Promise.withResolvers) {
+      const resolvers = Promise.withResolvers<Page>()
+      promise = resolvers.promise
+      resolve = resolvers.resolve
+      reject = resolvers.reject
+    } else {
+      promise = new Promise<Page>((resolvePromise, rejectPromise) => {
+        resolve = resolvePromise
+        reject = rejectPromise
+      })
+    }
+    const pendingPages = new Map<Page, (frame: Frame) => void>()
+    let settled = false
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const cleanup = () => {
+      clearTimeout(timeoutId)
+      this.browserContext.off('page', onPage)
+      this.browserContext.off('close', onContextClose)
+      for (const [page, listener] of pendingPages) page.off('framenavigated', listener)
+      pendingPages.clear()
+    }
+    const finish = (page: Page) => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve(page)
+    }
+    const onContextClose = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(new Error('Browser context closed while waiting for extension page'))
+    }
+    const matchPage = async (page: Page) => {
+      if (settled || (exactUrl ? page.url() !== url : !page.url().startsWith(url))) return
+      if (opener) {
+        try {
+          if ((await page.opener()) !== opener) return
+        } catch {
           return
         }
-        const onFrameNavigated = (frame: Frame) => {
-          if (frame === page.mainFrame() && frame.url().startsWith(baseUrl)) finish(page)
-        }
-        pendingPages.set(page, onFrameNavigated)
-        page.on('framenavigated', onFrameNavigated)
-        if (page.url().startsWith(baseUrl)) finish(page)
       }
-      this.browserContext.on('page', onPage)
-      this.browserContext.on('close', onContextClose)
-    })
+      finish(page)
+    }
+    const onPage = (page: Page) => {
+      if (settled || pendingPages.has(page)) return
+      const onFrameNavigated = (frame: Frame) => {
+        if (frame === page.mainFrame()) void matchPage(page)
+      }
+      pendingPages.set(page, onFrameNavigated)
+      page.on('framenavigated', onFrameNavigated)
+      void matchPage(page)
+    }
+    if (timeout > 0) {
+      timeoutId = setTimeout(() => {
+        settled = true
+        cleanup()
+        reject(new Error(`Timeout ${timeout}ms exceeded while waiting for extension page`))
+      }, timeout)
+    }
+    this.browserContext.on('page', onPage)
+    this.browserContext.on('close', onContextClose)
+    if (exactUrl) {
+      for (const page of this.browserContext.pages()) onPage(page)
+    }
+    return promise
   }
 
   activateAction(page: Page, kind?: ActionKind): Promise<Page>
@@ -197,7 +226,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     const popup =
       options.waitForPopup === false
         ? undefined
-        : this.waitForPopupPage(await this.getExtensionBaseUrl(), 15_000)
+        : this.waitForExtensionPage(await this.getExtensionBaseUrl(), 15_000)
     popup?.catch(() => undefined)
     await page.bringToFront()
     const chrome = this.session.chromeTarget
@@ -231,10 +260,57 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     if (popup) return popup
   }
 
+  async activateSidebar(page: Page): Promise<Page> {
+    if (this.closed) throw new Error('Extension harness is closed')
+    const baseUrl = await this.getExtensionBaseUrl()
+    await page.bringToFront()
+    const chrome = this.session.chromeTarget
+    if (!chrome)
+      throw new Error(
+        'Firefox RDP did not expose the parent chrome target for extension sidebar activation'
+      )
+    const chromeEvaluation = new RdpEvaluation(this.session.rdp, chrome.console())
+    const sidebarUrl = await chromeEvaluation.evaluate<string>(`(async () => {
+      const extensionId = ${JSON.stringify(this.id)}
+      const baseUrl = ${JSON.stringify(baseUrl)}
+      const controller = window.SidebarController
+      if (!controller) throw new Error('Firefox SidebarController is unavailable')
+      let entry
+      for (let attempt = 0; attempt < 200 && !entry; attempt++) {
+        if (controller._inited)
+          entry = [...controller.sidebars.entries()].find(([, sidebar]) => sidebar.extensionId === extensionId)
+        if (!entry) await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      if (!entry) throw new Error('Firefox extension sidebar is not registered')
+      const [commandId] = entry
+      if (!(await controller.show(commandId)))
+        throw new Error('Firefox could not activate the extension sidebar')
+      let browser
+      for (let attempt = 0; attempt < 600; attempt++) {
+        browser = controller.browser.contentDocument?.getElementById('webext-panels-browser')
+        if (browser?.currentURI?.spec.startsWith(baseUrl)) break
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      if (!browser?.browsingContext || !browser.currentURI.spec.startsWith(baseUrl))
+        throw new Error('Firefox extension sidebar inner browser did not load')
+      const { TargetRegistry } = ChromeUtils.importESModule('chrome://juggler/content/TargetRegistry.js')
+      const registry = TargetRegistry.instance()
+      if (!registry || typeof registry.registerExtensionSidebar !== 'function')
+        throw new Error('Firefox Juggler sidebar target support is unavailable')
+      registry.registerExtensionSidebar(window, extensionId)
+      return browser.currentURI.spec
+    })()`)
+    if (!sidebarUrl.startsWith(baseUrl))
+      throw new Error('Firefox returned an unexpected URL for the extension sidebar')
+    const sidebarPage = await this.waitForExtensionPage(sidebarUrl, 15_000, page, true)
+    await sidebarPage.waitForLoadState('load')
+    return sidebarPage
+  }
+
   async waitForPopup(options: { timeout?: number } = {}): Promise<Page> {
     if (this.closed) throw new Error('Extension harness is closed')
     const baseUrl = await this.getExtensionBaseUrl()
-    return this.waitForPopupPage(baseUrl, options.timeout ?? 15_000)
+    return this.waitForExtensionPage(baseUrl, options.timeout ?? 15_000)
   }
 
   async close(): Promise<void> {

@@ -66,6 +66,7 @@ export interface FirefoxExtension {
   installPath: string
   activateAction(page: Page, kind?: ActionKind): Promise<Page>
   activateAction(page: Page, kind: ActionKind, options: { waitForPopup: false }): Promise<void>
+  activateSidebar(page: Page): Promise<Page>
   waitForPopup(options?: { timeout?: number }): Promise<Page>
   close(): Promise<void>
 }

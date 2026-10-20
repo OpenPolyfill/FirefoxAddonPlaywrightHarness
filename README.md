@@ -2,11 +2,11 @@
 
 ## About
 
-A TypeScript Playwright harness for testing Firefox WebExtensions. It launches Firefox with an isolated persistent profile, installs the extension through Firefox RDP, evaluates background and page code when a background target exists, and exposes popup/action helpers.
+A TypeScript Playwright harness for testing Firefox WebExtensions. It launches Firefox with an isolated persistent profile, installs the extension through Firefox RDP, evaluates background and page code when a background target exists, and exposes action popup and sidebar helpers.
 
 ### Background-less extensions
 
-Extensions without a background page or worker install normally; `extension.background` is `undefined`. Browser and page action popups are triggered through privileged Firefox chrome code and do not require a background context.
+Extensions without a background page or worker install normally; `extension.background` is `undefined`. Browser and page action popups and extension sidebars are activated through privileged Firefox chrome code and do not require a background context.
 
 ## Features
 
@@ -15,8 +15,8 @@ Extensions without a background page or worker install normally; `extension.back
 - Optional background evaluation through `extension.background` for extensions with background pages or workers.
 - Page-bound isolated evaluation through `extension.isolated`.
 - Explicit page contexts through `extension.isolatedContexts.get(page)`.
-- Browser action and page action popup activation.
-- RDP-backed popup evaluation, selector waits, clicks, and close detection.
+- Browser action, page action, and extension sidebar activation as Playwright `Page` targets.
+- Popup and sidebar input, locators, screenshots, events, and close lifecycle through Playwright.
 - Idempotent Playwright Firefox patching for extension documents and experiment APIs.
 
 ## Installation
@@ -101,7 +101,8 @@ The `extension` fixture includes:
 - `background` — evaluator for the extension background context.
 - `isolated` — evaluator bound to the current fixture `page`.
 - `isolatedContexts.get(page)` — evaluator factory for another Playwright page.
-- `activateAction(page, kind)` and `waitForPopup()` — popup helpers. Pass `{ waitForPopup: false }` when triggering an action without waiting for a popup.
+- `activateAction(page, kind)` and `waitForPopup()` — open or wait for an action popup. Pass `{ waitForPopup: false }` for click-only actions.
+- `activateSidebar(page)` — open the extension sidebar and return its Playwright `Page`.
 - `id`, `installPath`, and `close()` — extension identity and lifecycle.
 
 `extension.isolated` is bound to the fixture's current `page` and follows that page across navigations. Use `extension.isolatedContexts.get(otherPage)` when the evaluation must target a specific Playwright page:
@@ -124,6 +125,15 @@ const pagePopup = await extension.activateAction(page, 'pageAction')
 ```
 
 `activateAction` brings the specified Playwright page to the foreground and invokes the WebExtension action. By default it returns the popup's actual Playwright page. Pass `{ waitForPopup: false }` for click-only actions, which returns `void` after triggering Firefox's action handler without waiting for a popup.
+
+For an extension that declares `sidebar_action`, open the sidebar as a Playwright page:
+
+```ts
+const sidebar = await extension.activateSidebar(page)
+await sidebar.getByRole('textbox').fill('search text')
+```
+
+The sidebar `Page` targets Firefox's inner `webext-panels-browser`, not the outer browser that hosts `webext-panels.xhtml`. Calling `sidebar.close()` hides the sidebar and closes its Playwright page.
 
 ## Configuration
 
