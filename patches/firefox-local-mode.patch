@@ -1,0 +1,18 @@
+diff --git a/browser/omni.ja/chrome/devtools/modules/devtools/shared/network-observer/NetworkLocalMode.sys.mjs b/browser/omni.ja/chrome/devtools/modules/devtools/shared/network-observer/NetworkLocalMode.sys.mjs
+--- a/browser/omni.ja/chrome/devtools/modules/devtools/shared/network-observer/NetworkLocalMode.sys.mjs
++++ b/browser/omni.ja/chrome/devtools/modules/devtools/shared/network-observer/NetworkLocalMode.sys.mjs
+@@ -12,5 +12,5 @@
+ ChromeUtils.defineESModuleGetters(lazy, {
+   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
+   NetworkOverride:
+     "resource://devtools/shared/network-observer/NetworkOverride.sys.mjs",
+-});
++}, { global: "contextual" });
+diff --git a/browser/omni.ja/chrome/devtools/modules/devtools/shared/network-observer/NetworkOverride.sys.mjs b/browser/omni.ja/chrome/devtools/modules/devtools/shared/network-observer/NetworkOverride.sys.mjs
+--- a/browser/omni.ja/chrome/devtools/modules/devtools/shared/network-observer/NetworkOverride.sys.mjs
++++ b/browser/omni.ja/chrome/devtools/modules/devtools/shared/network-observer/NetworkOverride.sys.mjs
+@@ -15,3 +15,3 @@
+ ChromeUtils.defineESModuleGetters(lazy, {
+   FileUtils: "resource://gre/modules/FileUtils.sys.mjs",
+-});
++}, { global: "contextual" });

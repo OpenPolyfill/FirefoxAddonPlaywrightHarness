@@ -1,5 +1,5 @@
 export { launchFirefoxExtension } from './launch.js'
-export { ensureFirefoxPatched, replaceExactlyOnce, PATCH_MARKER } from './patch.js'
+export { ensureFirefoxPatched } from './patch.js'
 export { createFirefoxFixtures, withSharedPage } from './fixtures.js'
 export type { FirefoxFixtures } from './fixtures.js'
 export { FirefoxRdpSession, RdpEvaluation, RdpInspectedWindowEvaluation } from './rdp.js'

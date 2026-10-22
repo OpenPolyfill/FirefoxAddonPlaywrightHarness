@@ -36,7 +36,10 @@
   },
   "files": [
     "dist",
+    "patches",
     "scripts/patch-closed-shadow-selectors.mjs",
+    "scripts/unified-patch.mjs",
+    "scripts/unified-patch.d.mts",
     "README.md",
     "LICENSE"
   ],
@@ -51,7 +54,7 @@
     "format:ts": "prettier 'src/**/*.ts' 'tests/**/*.ts' --write",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
-    "test": "npm run build && node --test dist-tests/**/*.test.js",
+    "test": "npm run build && node --test tests/*.test.mjs",
     "verify": "npm run format:check && npm run lint && npm run typecheck",
     "pack:check": "npm run build && npm pack --dry-run",
     "docs:setup": "node scripts/docs-svocs.mjs setup",
@@ -63,6 +66,7 @@
   },
   "dependencies": {
     "@openpolyfill/firefox-rdp": "^0.1.0",
+    "diff": "^8.0.4",
     "jszip": "^3.10.2"
   },
   "peerDependencies": {

@@ -1,0 +1,539 @@
+diff --git a/playwright.cfg b/playwright.cfg
+--- a/playwright.cfg
++++ b/playwright.cfg
+@@ -368,3 +368,4 @@
+ 
+ // Disable spell check
+ pref("layout.spellcheckDefault", 0);
++lockPref("marionette.running", true);
+diff --git a/omni.ja/modules/addons/AddonSettings.sys.mjs b/omni.ja/modules/addons/AddonSettings.sys.mjs
+--- a/omni.ja/modules/addons/AddonSettings.sys.mjs
++++ b/omni.ja/modules/addons/AddonSettings.sys.mjs
+@@ -113,7 +113,7 @@
+     true
+   );
+ } else {
+-  makeConstant("EXPERIMENTS_ENABLED", false);
++  makeConstant("EXPERIMENTS_ENABLED", true);
+ }
+ 
+ if (AppConstants.MOZ_DEV_EDITION) {
+diff --git a/omni.ja/chrome/juggler/content/content/JugglerFrameChild.jsm b/omni.ja/chrome/juggler/content/content/JugglerFrameChild.jsm
+--- a/omni.ja/chrome/juggler/content/content/JugglerFrameChild.jsm
++++ b/omni.ja/chrome/juggler/content/content/JugglerFrameChild.jsm
+@@ -46,7 +46,7 @@
+       this._agents()?.pageAgent.onWindowEvent(event);
+     }));
+ 
+-    if (this.document.documentURI.startsWith('moz-extension://'))
++    if (this.document.documentURI.startsWith('moz-extension-DISABLED://'))
+       return;
+ 
+     // Child frame events will be forwarded to related top-level agents.
+diff --git a/omni.ja/chrome/juggler/content/content/FrameTree.js b/omni.ja/chrome/juggler/content/content/FrameTree.js
+--- a/omni.ja/chrome/juggler/content/content/FrameTree.js
++++ b/omni.ja/chrome/juggler/content/content/FrameTree.js
+@@ -510,6 +510,30 @@
+       wantExportHelpers: false,
+       wantXrays: true,
+     });
++    if (name === '__playwright_utility_world__') {
++      const nativeGetter = Object.getOwnPropertyDescriptor(
++        this.domWindow().Element.prototype,
++        'openOrClosedShadowRoot'
++      )?.get;
++      if (!nativeGetter)
++        throw new Error('Firefox openOrClosedShadowRoot getter is unavailable');
++      Cu.exportFunction(
++        (host) => nativeGetter.call(host) ?? host.shadowRoot,
++        sandbox,
++        { defineAs: '__openpolyfillClosedShadowRootHelper__' }
++      );
++      Cu.evalInSandbox(
++        '(function() {' +
++          'const getClosedRoot = globalThis["__openpolyfillClosedShadowRootHelper__"];' +
++          'Object.defineProperty(Element.prototype, "openOrClosedShadowRoot", {' +
++            'configurable: true,' +
++            'get() { return getClosedRoot(this); }' +
++          '});' +
++          'if (!delete globalThis["__openpolyfillClosedShadowRootHelper__"]) throw new Error("Temporary closed-shadow getter leaked");' +
++        '})()',
++        sandbox
++      );
++    }
+     const world = this._runtime.createExecutionContext(this.domWindow(), sandbox, {
+       frameId: this.id(),
+       name,
+diff --git a/omni.ja/chrome/juggler/content/TargetRegistry.js b/omni.ja/chrome/juggler/content/TargetRegistry.js
+--- a/omni.ja/chrome/juggler/content/TargetRegistry.js
++++ b/omni.ja/chrome/juggler/content/TargetRegistry.js
+@@ -180,6 +180,96 @@
+     };
+ 
+     const domWindowTabListeners = new Map();
++
++    const popupTargetsByWindow = new Map();
++
++    this.registerExtensionSidebar = (ownerWindow, extensionId) => {
++      const controller = ownerWindow.SidebarController;
++      if (!controller || !controller._box)
++        throw new Error('Firefox SidebarController is unavailable');
++      const entry = [...controller.sidebars.entries()].find(([, sidebar]) => sidebar.extensionId === extensionId);
++      if (!entry)
++        throw new Error('Firefox extension sidebar is not registered');
++      const [commandID] = entry;
++      if (!controller.isOpen || controller.currentID !== commandID)
++        throw new Error('Firefox extension sidebar is not active');
++      const hostBrowser = controller.browser;
++      const browser = hostBrowser.contentDocument?.getElementById('webext-panels-browser');
++      if (!browser || browser.getAttribute('webextension-view-type') !== 'sidebar' || !browser.browsingContext)
++        throw new Error('Firefox extension sidebar inner browser is unavailable');
++      const existing = this._browserToTarget.get(browser);
++      if (existing) {
++        if (existing._sidebarExtensionID === extensionId && existing._sidebarCommandID === commandID)
++          return existing.id();
++        if (existing._sidebarController)
++          existing.dispose();
++        else
++          throw new Error('Firefox extension sidebar browser already has a Juggler target');
++      }
++      const browsingContext = browser.browsingContext;
++      const opener = this._browserToTarget.get(ownerWindow.gBrowser.selectedBrowser);
++      const userContextId = browsingContext.originAttributes.userContextId || 0;
++      const browserContext = opener ? opener.browserContext() : this._userContextIdToBrowserContext.get(userContextId);
++      if (!browserContext)
++        throw new Error('Firefox extension sidebar has no Playwright browser context');
++      const sidebarTab = { linkedBrowser: browser, userContextId };
++      const target = new PageTarget(this, ownerWindow, sidebarTab, browserContext, opener, null, controller, commandID, extensionId);
++      target._sidebarOwnerWindow = ownerWindow;
++      target._sidebarOwnerUnloadListener = () => target.dispose();
++      ownerWindow.addEventListener('unload', target._sidebarOwnerUnloadListener, { once: true });
++      target._sidebarHostBrowser = hostBrowser;
++      const onSidebarChange = () => {
++        const activeBrowser = hostBrowser.contentDocument?.getElementById('webext-panels-browser');
++        if (!controller.isOpen || controller.currentID !== commandID || activeBrowser !== browser)
++          target.dispose();
++      };
++      const observer = new ownerWindow.MutationObserver(onSidebarChange);
++      target._sidebarObserver = observer;
++      observer.observe(controller._box, { attributes: true, attributeFilter: ['hidden'] });
++      const sidebarDocument = browser.ownerDocument;
++      if (sidebarDocument?.documentElement)
++        observer.observe(sidebarDocument.documentElement, { childList: true, subtree: true });
++      const onHostLoad = () => onSidebarChange();
++      target._sidebarHostLoadListener = onHostLoad;
++      hostBrowser.addEventListener('load', onHostLoad, true);
++      target.updateOverridesForBrowsingContext(browsingContext);
++      target.updateViewportSize().catch(error => dump('Sidebar viewport update failed: ' + error + '\n'));
++      return target.id();
++    };
++    const onExtensionPopupLoaded = (ownerWindow, event) => {
++      const browser = event.target;
++      if (!browser || browser.getAttribute('webextension-view-type') !== 'popup' || this._browserToTarget.has(browser))
++        return;
++      let panel = browser.parentNode;
++      while (panel && panel.localName !== 'panel')
++        panel = panel.parentNode;
++      if (!panel || panel.id === 'webextension-remote-preload-panel')
++        return;
++      const browsingContext = browser.browsingContext;
++      if (!browsingContext)
++        return;
++      const opener = this._browserToTarget.get(ownerWindow.gBrowser.selectedBrowser);
++      const userContextId = browsingContext.originAttributes.userContextId || 0;
++      const browserContext = opener ? opener.browserContext() : this._userContextIdToBrowserContext.get(userContextId);
++      if (!browserContext)
++        return;
++      const popupTab = { linkedBrowser: browser, userContextId };
++      const target = new PageTarget(this, ownerWindow, popupTab, browserContext, opener, panel);
++      let targets = popupTargetsByWindow.get(ownerWindow);
++      if (!targets) {
++        targets = new Set();
++        popupTargetsByWindow.set(ownerWindow, targets);
++      }
++      targets.add(target);
++      target.updateOverridesForBrowsingContext(browsingContext);
++      target.updateViewportSize().catch(error => dump('Popup viewport update failed: ' + error + '\n'));
++      const onPopupHidden = () => {
++        popupTargetsByWindow.get(ownerWindow)?.delete(target);
++        target.dispose();
++        panel.removeEventListener('popuphidden', onPopupHidden);
++      };
++      panel.addEventListener('popuphidden', onPopupHidden);
++    };
+ 
+     const onOpenWindow = async (appWindow) => {
+ 
+@@ -211,6 +301,7 @@
+       domWindowTabListeners.set(domWindow, [
+         helper.addEventListener(tabContainer, 'TabOpen', event => onTabOpenListener(appWindow, domWindow, event)),
+         helper.addEventListener(tabContainer, 'TabClose', onTabCloseListener),
++        helper.addEventListener(domWindow.document, 'WebExtPopupLoaded', event => onExtensionPopupLoaded(domWindow, event)), 
+       ]);
+       for (const tab of domWindow.gBrowser.tabs)
+         onTabOpenListener(appWindow, domWindow, { target: tab });
+@@ -226,6 +317,10 @@
+       const listeners = domWindowTabListeners.get(domWindow) || [];
+       domWindowTabListeners.delete(domWindow);
+       helper.removeListeners(listeners);
++
++      for (const target of popupTargetsByWindow.get(domWindow) || [])
++        target.dispose();
++      popupTargetsByWindow.delete(domWindow);
+       for (const tab of domWindow.gBrowser.tabs)
+         onTabCloseListener({ target: tab });
+     };
+@@ -405,14 +500,18 @@
+ }
+ 
+ export class PageTarget {
+-  constructor(registry, win, tab, browserContext, opener) {
++  constructor(registry, win, tab, browserContext, opener, popupPanel = null, sidebarController = null, sidebarCommandID = null, sidebarExtensionID = null) {  
+     helper.decorateAsEventEmitter(this);
+ 
+     this._targetId = helper.generateId();
+     this._registry = registry;
+     this._window = win;
+-    this._gBrowser = win.gBrowser;
++    this._gBrowser = (popupPanel || sidebarController) ? { documentGlobal: tab.linkedBrowser.contentWindow } : win.gBrowser;
+     this._tab = tab;
++    this._popupPanel = popupPanel; 
++    this._sidebarController = sidebarController;
++    this._sidebarCommandID = sidebarCommandID;
++    this._sidebarExtensionID = sidebarExtensionID; 
+     this._linkedBrowser = tab.linkedBrowser;
+     this._browserContext = browserContext;
+     this._viewportSize = undefined;
+@@ -898,6 +997,118 @@
+   DialogClosed: Symbol('PageTarget.DialogClosed'),
+ };
+ 
++
++const originalPopupActivateAndRun = PageTarget.prototype.activateAndRun;
++PageTarget.prototype.activateAndRun = function(callback = () => {}, options = {}) {
++  if (!this._popupPanel)
++    return originalPopupActivateAndRun.call(this, callback, options);
++  if (this._disposed || this._popupPanel.state !== 'open')
++    throw new Error('Popup page is closed');
++  return callback();
++};
++
++const originalPopupClose = PageTarget.prototype.close;
++PageTarget.prototype.close = function(runBeforeUnload = false) {
++  if (!this._popupPanel)
++    return originalPopupClose.call(this, runBeforeUnload);
++  if (!this._disposed && this._popupPanel.state !== 'closed' && this._popupPanel.state !== 'hiding')
++    this._popupPanel.hidePopup();
++};
++
++const originalPopupUpdateViewportSize = PageTarget.prototype.updateViewportSize;
++PageTarget.prototype.updateViewportSize = async function() {
++  if (!this._popupPanel)
++    return originalPopupUpdateViewportSize.call(this);
++  await waitForWindowReady(this._window);
++  this.updateDPPXOverride();
++  this.updateScreenEmulation();
++  const viewportSize = this._viewportSize || this._browserContext.defaultViewportSize;
++  if (viewportSize) {
++    const { width, height } = viewportSize;
++    this._linkedBrowser.style.setProperty('width', width + 'px');
++    this._linkedBrowser.style.setProperty('min-width', width + 'px');
++    this._linkedBrowser.style.setProperty('height', height + 'px');
++    this._linkedBrowser.style.setProperty('min-height', height + 'px');
++  } else {
++    this._linkedBrowser.style.removeProperty('width');
++    this._linkedBrowser.style.removeProperty('min-width');
++    this._linkedBrowser.style.removeProperty('height');
++    this._linkedBrowser.style.removeProperty('min-height');
++  }
++  const actualSize = this._linkedBrowser.getBoundingClientRect();
++  await this._channel.connect('').send('awaitViewportDimensions', {
++    width: actualSize.width / this._zoom,
++    height: actualSize.height / this._zoom,
++  });
++};
++
++
++const originalSidebarActivateAndRun = PageTarget.prototype.activateAndRun;
++PageTarget.prototype.activateAndRun = function(callback = () => {}, options = {}) {
++  if (!this._sidebarController)
++    return originalSidebarActivateAndRun.call(this, callback, options);
++  if (
++    this._disposed ||
++    !this._sidebarController.isOpen ||
++    this._sidebarController.currentID !== this._sidebarCommandID
++  )
++    throw new Error('Sidebar page is closed');
++  return callback();
++};
++
++const originalSidebarClose = PageTarget.prototype.close;
++PageTarget.prototype.close = function(runBeforeUnload = false) {
++  if (!this._sidebarController)
++    return originalSidebarClose.call(this, runBeforeUnload);
++  if (this._disposed)
++    return;
++  this._sidebarController.hide({ dismissPanel: true });
++  if (!this._sidebarController.isOpen || this._sidebarController.currentID !== this._sidebarCommandID)
++    this.dispose();
++};
++
++const originalSidebarDispose = PageTarget.prototype.dispose;
++PageTarget.prototype.dispose = function() {
++  if (this._sidebarController && this._disposed)
++    return;
++  if (this._sidebarController) {
++    this._sidebarObserver?.disconnect();
++    this._sidebarObserver = undefined;
++    if (this._sidebarHostBrowser && this._sidebarHostLoadListener)
++      this._sidebarHostBrowser.removeEventListener('load', this._sidebarHostLoadListener, true);
++    if (this._sidebarOwnerWindow && this._sidebarOwnerUnloadListener)
++      this._sidebarOwnerWindow.removeEventListener('unload', this._sidebarOwnerUnloadListener);
++  }
++  return originalSidebarDispose.call(this);
++};
++
++const originalSidebarUpdateViewportSize = PageTarget.prototype.updateViewportSize;
++PageTarget.prototype.updateViewportSize = async function() {
++  if (!this._sidebarController)
++    return originalSidebarUpdateViewportSize.call(this);
++  await waitForWindowReady(this._window);
++  this.updateDPPXOverride();
++  this.updateScreenEmulation();
++  const viewportSize = this._viewportSize;
++  if (viewportSize) {
++    const { width, height } = viewportSize;
++    this._linkedBrowser.style.setProperty('width', width + 'px');
++    this._linkedBrowser.style.setProperty('min-width', width + 'px');
++    this._linkedBrowser.style.setProperty('height', height + 'px');
++    this._linkedBrowser.style.setProperty('min-height', height + 'px');
++  } else {
++    this._linkedBrowser.style.removeProperty('width');
++    this._linkedBrowser.style.removeProperty('min-width');
++    this._linkedBrowser.style.removeProperty('height');
++    this._linkedBrowser.style.removeProperty('min-height');
++  }
++  const actualSize = this._linkedBrowser.getBoundingClientRect();
++  await this._channel.connect('').send('awaitViewportDimensions', {
++    width: actualSize.width / this._zoom,
++    height: actualSize.height / this._zoom,
++  });
++};
++
+ function fromProtocolColorScheme(colorScheme) {
+   if (colorScheme === 'light' || colorScheme === 'dark')
+     return colorScheme;
+diff --git a/omni.ja/chrome/juggler/content/protocol/PageHandler.js b/omni.ja/chrome/juggler/content/protocol/PageHandler.js
+--- a/omni.ja/chrome/juggler/content/protocol/PageHandler.js
++++ b/omni.ja/chrome/juggler/content/protocol/PageHandler.js
+@@ -685,3 +685,89 @@
+     return await worker.sendMessage(JSON.parse(message));
+   }
+ }
++
++
++
++const originalPopupPageReload = PageHandler.prototype['Page.reload'];
++PageHandler.prototype['Page.reload'] = async function() {
++  if (this._pageTarget._popupPanel || this._pageTarget._sidebarController) {
++    this._pageTarget.linkedBrowser().webNavigation.reload(Ci.nsIWebNavigation.LOAD_FLAGS_NONE);
++    return;
++  }
++  return originalPopupPageReload.call(this);
++};
++const originalPopupDispatchMouseEvent = PageHandler.prototype['Page.dispatchMouseEvent'];
++PageHandler.prototype['Page.dispatchMouseEvent'] = async function(options) {
++  const { type, x, y, button = 0, clickCount, modifiers = 0, buttons = 0 } = options;
++  const isPopup = !!this._pageTarget._popupPanel;
++  const isSidebar = !!this._pageTarget._sidebarController;
++  if (
++    (!isPopup && !isSidebar) ||
++    (isPopup && !modifiers) ||
++    !['mousedown', 'mousemove', 'mouseup'].includes(type)
++  )
++    return originalPopupDispatchMouseEvent.call(this, options);
++
++  const browser = this._pageTarget._linkedBrowser;
++  browser.scrollRectIntoViewIfNeeded(x, y, 0, 0);
++  const bounds = browser.getBoundingClientRect();
++  if (x < 0 || y < 0 || x > bounds.width || y > bounds.height)
++    return originalPopupDispatchMouseEvent.call(this, options);
++
++
++  const sendMouseEvent = async eventType => {
++    await this._contentPage.send('dispatchDragEvent', {
++      type: eventType,
++      x,
++      y,
++      button,
++      clickCount,
++      modifiers,
++      buttons
++    });
++  };
++
++  return this._pageTarget.activateAndRun(async () => {
++    this._pageTarget.ensureContextMenuClosed();
++    if (type === 'mousedown') {
++      if (!this._isDragging)
++        await sendMouseEvent(type);
++      return;
++    }
++
++    if (type === 'mousemove') {
++      this._lastMousePosition = { x, y };
++      if (this._isDragging) {
++        const watcher = new EventWatcher(this._pageEventSink, ['dragover'], this._pendingEventWatchers);
++        await this._contentPage.send('dispatchDragEvent', { type: 'dragover', x, y, modifiers });
++        await watcher.ensureEventsAndDispose(['dragover']);
++        return;
++      }
++      const watcher = new EventWatcher(
++        this._pageEventSink,
++        ['dragstart', 'juggler-drag-finalized'],
++        this._pendingEventWatchers
++      );
++      await sendMouseEvent(type);
++      if (watcher.hasEvent('dragstart')) {
++        const eventObject = await watcher.ensureEvent('juggler-drag-finalized');
++        this._isDragging = eventObject.dragSessionStarted;
++      }
++      watcher.dispose();
++      return;
++    }
++
++    if (this._isDragging) {
++      const watcher = new EventWatcher(this._pageEventSink, ['dragover'], this._pendingEventWatchers);
++      await this._contentPage.send('dispatchDragEvent', { type: 'dragover', x, y, modifiers });
++      await this._contentPage.send('dispatchDragEvent', { type: 'drop', x, y, modifiers });
++      await this._contentPage.send('dispatchDragEvent', { type: 'dragend', x, y, modifiers });
++      await watcher.ensureEventsAndDispose(['dragover']);
++      this._isDragging = false;
++      return;
++    }
++    await sendMouseEvent(type);
++  }, { muteNotificationsPopup: true });
++};
++
++
+diff --git a/omni.ja/chrome/juggler/content/content/PageAgent.js b/omni.ja/chrome/juggler/content/content/PageAgent.js
+--- a/omni.ja/chrome/juggler/content/content/PageAgent.js
++++ b/omni.ja/chrome/juggler/content/content/PageAgent.js
+@@ -147,7 +147,7 @@
+         crash: this._crash.bind(this),
+         describeNode: this._describeNode.bind(this),
+         dispatchKeyEvent: this._dispatchKeyEvent.bind(this),
+-        dispatchDragEvent: this._dispatchDragEvent.bind(this),
++        dispatchDragEvent: this._dispatchPopupMouseEvent.bind(this),
+         dispatchTouchEvent: this._dispatchTouchEvent.bind(this),
+         dispatchTapEvent: this._dispatchTapEvent.bind(this),
+         getContentQuads: this._getContentQuads.bind(this),
+@@ -556,6 +556,108 @@
+     return domWindow ? dragService.getCurrentSession(domWindow) : undefined;
+   }
+ 
++
++  async _dispatchPopupMouseEvent({type, x, y, button = 0, clickCount = 0, modifiers = 0, buttons = 0}) {
++    if (!['mousedown', 'mousemove', 'mouseup'].includes(type))
++      return this._dispatchDragEvent({ type, x, y, modifiers });
++    const win = this._frameTree.mainFrame().domWindow();
++    const target = win.document.elementFromPoint(x, y) || win.document.documentElement;
++    const eventOptions = {
++      bubbles: true,
++      cancelable: true,
++      composed: true,
++      view: win,
++      detail: clickCount,
++      screenX: Math.round(win.mozInnerScreenX + x),
++      screenY: Math.round(win.mozInnerScreenY + y),
++      clientX: x,
++      clientY: y,
++      button,
++      buttons,
++      ctrlKey: !!(modifiers & 2),
++      altKey: !!(modifiers & 1),
++      shiftKey: !!(modifiers & 4),
++      metaKey: !!(modifiers & 8)
++    };
++    const pointerEventTypes = {
++      mousemove: 'pointermove',
++      mousedown: 'pointerdown',
++      mouseup: 'pointerup',
++      mouseover: 'pointerover',
++      mouseout: 'pointerout',
++      mouseenter: 'pointerenter',
++      mouseleave: 'pointerleave',
++      click: 'click',
++      auxclick: 'auxclick',
++      dblclick: 'dblclick'
++    };
++    const dispatch = (eventType, eventTarget = target, detail = clickCount, relatedTarget = null) => {
++      const options = {
++        ...eventOptions,
++        bubbles: !['mouseenter', 'mouseleave'].includes(eventType),
++        detail,
++        relatedTarget
++      };
++      const pointerEventType = pointerEventTypes[eventType];
++      if (pointerEventType) {
++        const pointerOptions = {
++          ...options,
++          pointerId: 1,
++          pointerType: 'mouse',
++          isPrimary: true,
++          width: 1,
++          height: 1,
++          pressure: buttons ? 0.5 : 0,
++          tangentialPressure: 0,
++          tiltX: 0,
++          tiltY: 0,
++          twist: 0,
++          button: eventType === 'mousemove' && buttons === 0 ? -1 : button
++        };
++        win.windowUtils.dispatchDOMEventViaPresShellForTesting(
++          eventTarget,
++          new win.PointerEvent(pointerEventType, pointerOptions)
++        );
++      }
++      return win.windowUtils.dispatchDOMEventViaPresShellForTesting(
++        eventTarget,
++        new win.MouseEvent(eventType, options)
++      );
++    };
++    if (type === 'mousemove') {
++      const previousTarget = this._popupMouseLastTarget;
++      if (previousTarget !== target) {
++        const ancestors = element => {
++          const result = [];
++          for (let current = element; current; current = current.parentElement)
++            result.push(current);
++          return result;
++        };
++        const previousAncestors = previousTarget ? ancestors(previousTarget) : [];
++        const targetAncestors = ancestors(target);
++        while (
++          previousAncestors.length &&
++          targetAncestors.length &&
++          previousAncestors[previousAncestors.length - 1] === targetAncestors[targetAncestors.length - 1]
++        ) {
++          previousAncestors.pop();
++          targetAncestors.pop();
++        }
++        if (previousTarget) {
++          dispatch('mouseout', previousTarget, 0, target);
++          for (const ancestor of previousAncestors)
++            dispatch('mouseleave', ancestor, 0, target);
++        }
++        dispatch('mouseover', target, 0, previousTarget);
++        for (const ancestor of targetAncestors.reverse())
++          dispatch('mouseenter', ancestor, 0, previousTarget);
++        this._popupMouseLastTarget = target;
++      }
++      return dispatch(type);
++    }
++    return dispatch(type);
++  }
++
+   async _dispatchDragEvent({type, x, y, modifiers}) {
+     const session = this._getCurrentDragSession();
+     const dropEffect = session.dataTransfer.dropEffect;
