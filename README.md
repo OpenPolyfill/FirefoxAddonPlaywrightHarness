@@ -168,6 +168,7 @@ The sidebar `Page` targets Firefox's inner `webext-panels-browser`, not the oute
 - `launchOptions` — additional Playwright persistent-context options.
 - `postInstallPages` — optional URL strings or regular expressions used to wait for startup pages.
 - `localMappings` — optional hostname-to-directory map for static fixtures through Firefox 153+ DevTools Local Mode; relative directories resolve from the current working directory.
+- `nativeMessagingHosts` — host-name map to executable, optional description, and allowed extension IDs. The harness registers each host in a private per-instance manifest directory on Linux/macOS.
 - `patchFirefox` — set to `false` only when the required Playwright and Firefox patches are already applied; `localMappings` also requires the Firefox Local Mode compatibility patch.
 - `contextScope`: `'test'` by default, or `'worker'` to share one Firefox context for a Playwright worker.
 - `resolveProjectOptions`: maps the worker or test `project.use` settings to `headless` and `launchOptions`.

@@ -53,6 +53,27 @@ const test = createFirefoxFixtures(base, {
 
 Firefox 153+ serves each mapped origin through its built-in DevTools Local Mode. The harness enables `network-event` watching and registers mappings before returning the fixture page or a page created with `context.newPage()`. Each page owns its watcher; closing a page clears its mappings and stops resource watching, and closing the context cleans up any remaining watchers.
 
+### Firefox Native Messaging
+
+Register native hosts in the fixture configuration. Each entry's key becomes the host name in the native manifest:
+
+```ts
+const test = createFirefoxFixtures(base, {
+  extensionPath: './dist-extension',
+  nativeMessagingHosts: {
+    'org.example.echo': {
+      executable: './tests/native-host',
+      description: 'Echo host for tests',
+      allowedExtensions: ['my-addon@example.org']
+    }
+  }
+})
+```
+
+The extension must request the `nativeMessaging` permission, and its Gecko ID must appear in `allowedExtensions`. Executable paths resolve from the current working directory and must be executable. The host uses Firefox's native stdio framing and receives its manifest path and extension ID as arguments.
+
+On Linux, the harness writes manifests under a unique temporary directory for each Firefox instance, then uses privileged RDP evaluation to set `XREUserNativeManifests` before initializing Firefox's native manifest cache. It does not write to `~/.mozilla/native-messaging-hosts`. The worker or test fixture teardown closes Firefox (which shuts down native hosts) before removing the temporary profile and manifests.
+
 ## Extension handle
 
 The `extension` fixture exposes:

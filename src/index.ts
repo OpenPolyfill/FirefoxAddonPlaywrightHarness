@@ -10,6 +10,7 @@ export type {
   FirefoxExtension,
   FirefoxHarnessConfig,
   FirefoxHarnessProjectOptions,
+  NativeMessagingHostConfig,
   FirefoxIsolated,
   FirefoxIsolatedContexts,
   FirefoxIsolatedPage,

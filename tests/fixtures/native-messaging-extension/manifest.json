@@ -1,0 +1,12 @@
+{
+  "manifest_version": 2,
+  "name": "Harness native messaging fixture",
+  "version": "1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "native.messaging@tests.mozilla.org"
+    }
+  },
+  "permissions": ["nativeMessaging"],
+  "background": { "scripts": ["background.js"] }
+}

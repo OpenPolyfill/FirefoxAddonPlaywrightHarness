@@ -7,6 +7,10 @@ import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
 import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
 import { FirefoxRdpSession, RdpEvaluation } from './rdp.js'
 import {
+  configureNativeMessagingDirectory,
+  prepareNativeMessagingHosts
+} from './native-messaging.js'
+import {
   attachFirefoxLocalMappings,
   resolveLocalMappings,
   type FirefoxLocalModeController
@@ -61,7 +65,12 @@ export async function launchFirefoxExtension(
   let session: FirefoxRdpSession | undefined
   let extension: FirefoxExtension | undefined
   let localMode: FirefoxLocalModeController | undefined
+  let nativeManifestBaseDir: string | undefined
   try {
+    nativeManifestBaseDir = await prepareNativeMessagingHosts(
+      userDataDir,
+      config.nativeMessagingHosts
+    )
     if (config.patchFirefox !== false) await ensureFirefoxPatched()
     await assertClosedShadowSelectorPatched()
     context = await firefox.launchPersistentContext(
@@ -69,6 +78,12 @@ export async function launchFirefoxExtension(
       launchOptions(config, releasePort.port)
     )
     session = await FirefoxRdpSession.connect(releasePort.port)
+    if (nativeManifestBaseDir) {
+      const chromeTarget = session.chromeTarget
+      if (!chromeTarget)
+        throw new Error('Firefox RDP did not expose the chrome target for native manifest setup')
+      await configureNativeMessagingDirectory(session.rdp, chromeTarget, nativeManifestBaseDir)
+    }
     const installed = await session.installExtension(extensionPath)
     extension = new FirefoxExtensionHandle(
       session,

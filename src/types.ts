@@ -9,6 +9,14 @@ export interface FirefoxHarnessProjectOptions {
   launchOptions?: Record<string, unknown>
 }
 
+export interface NativeMessagingHostConfig {
+  /** Executable Firefox launches for this native messaging host. */
+  executable: string
+  /** Firefox extension IDs allowed to connect to the host. */
+  allowedExtensions: string[]
+  description?: string
+}
+
 export interface FirefoxHarnessConfig {
   extensionPath: string
   headless?: boolean
@@ -16,6 +24,8 @@ export interface FirefoxHarnessConfig {
   args?: string[]
   launchOptions?: Record<string, unknown>
   postInstallPages?: UrlMatcher[]
+  /** Native messaging hosts isolated to this Firefox instance on Linux/macOS. */
+  nativeMessagingHosts?: Record<string, NativeMessagingHostConfig>
   /** Hostname-to-directory mappings served by Firefox 153+ DevTools Local Mode. */
   localMappings?: Record<string, string>
   patchFirefox?: boolean

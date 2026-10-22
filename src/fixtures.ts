@@ -138,6 +138,7 @@ async function launchHarnessContext(
         ? config.launchOptions
         : { ...config.launchOptions, ...projectOptions.launchOptions },
     postInstallPages: config.postInstallPages,
+    nativeMessagingHosts: config.nativeMessagingHosts,
     localMappings: config.localMappings,
     patchFirefox: config.patchFirefox
   })
