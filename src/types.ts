@@ -16,6 +16,8 @@ export interface FirefoxHarnessConfig {
   args?: string[]
   launchOptions?: Record<string, unknown>
   postInstallPages?: UrlMatcher[]
+  /** Hostname-to-directory mappings served by Firefox 153+ DevTools Local Mode. */
+  localMappings?: Record<string, string>
   patchFirefox?: boolean
   /** Context lifetime. The default is one Firefox context per test. */
   contextScope?: 'test' | 'worker'

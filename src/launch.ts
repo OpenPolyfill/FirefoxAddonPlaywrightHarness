@@ -6,6 +6,11 @@ import { acquireRdpPort } from './port.js'
 import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
 import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
 import { FirefoxRdpSession, RdpEvaluation } from './rdp.js'
+import {
+  attachFirefoxLocalMappings,
+  resolveLocalMappings,
+  type FirefoxLocalModeController
+} from './local-mode.js'
 import { RdpIsolatedNamespace } from './isolated.js'
 
 import type {
@@ -49,11 +54,13 @@ export async function launchFirefoxExtension(
 ): Promise<FirefoxLaunchResult> {
   if (!config.extensionPath) throw new Error('extensionPath is required')
   const extensionPath = resolve(config.extensionPath)
+  const localMappings = await resolveLocalMappings(config.localMappings)
   const releasePort = await acquireRdpPort()
   const userDataDir = trackTempDir(await mkdtemp(join(tmpdir(), 'firefox-addon-test-')))
   let context: BrowserContext | undefined
   let session: FirefoxRdpSession | undefined
   let extension: FirefoxExtension | undefined
+  let localMode: FirefoxLocalModeController | undefined
   try {
     if (config.patchFirefox !== false) await ensureFirefoxPatched()
     await assertClosedShadowSelectorPatched()
@@ -70,6 +77,8 @@ export async function launchFirefoxExtension(
       extensionPath,
       installed.background
     )
+    localMode = await attachFirefoxLocalMappings(context, session.rdp, localMappings)
+
     const result: FirefoxLaunchResult = {
       context,
       rdp: session.rdp,
@@ -77,14 +86,19 @@ export async function launchFirefoxExtension(
       userDataDir,
       rdpPort: releasePort.port,
       close: async () => {
-        await extension?.close()
-        await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
-        await removeTempDir(userDataDir)
-        await releasePort.release()
+        try {
+          await localMode?.close()
+        } finally {
+          await extension?.close()
+          await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
+          await removeTempDir(userDataDir)
+          await releasePort.release()
+        }
       }
     }
     return result
   } catch (error) {
+    await localMode?.close().catch(() => {})
     session?.close()
     await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
     await removeTempDir(userDataDir)

@@ -35,6 +35,28 @@ await watcher.api.watchTargets({ targetType: 'frame' })
 
 Use `rdp.front(actorId, typeName).api.method(...)` for generated methods and `rdp.actor(actorId).call(method, params)` when a generic fallback is needed.
 
+## Firefox DevTools Local Mode
+
+The harness `localMappings` option manages this watcher lifecycle automatically. For direct RDP use, Firefox 153+ requires the network resource watcher before its network parent actor is requested:
+
+The package's Firefox Local Mode compatibility patch adjusts these module imports in the `browser/omni.ja` archive so Firefox can load them from its distinct DevTools global. The package `globalSetup` applies this unified diff with the other Firefox patches.
+
+```ts
+const watcher = await selected.getWatcher()
+await watcher.watchResources(['network-event'])
+const networkParent = await watcher.api.getNetworkParentActor()
+await networkParent.api.setLocalModeMappings({
+  'app.localhost': '/absolute/path/to/app-fixtures'
+})
+```
+
+Clear the mappings and stop watching when the page closes:
+
+```ts
+await networkParent.api.setLocalModeMappings({})
+await watcher.unwatchResources(['network-event'])
+```
+
 ## Security
 
 Firefox RDP is privileged, unauthenticated, and unencrypted at the TCP layer. The harness binds its endpoint to localhost. Do not expose the endpoint to a LAN or the public Internet.

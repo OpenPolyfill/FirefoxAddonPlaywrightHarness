@@ -167,22 +167,38 @@ The sidebar `Page` targets Firefox's inner `webext-panels-browser`, not the oute
 - `args` — additional Firefox command-line arguments.
 - `launchOptions` — additional Playwright persistent-context options.
 - `postInstallPages` — optional URL strings or regular expressions used to wait for startup pages.
-- `patchFirefox` — set to `false` only when the required Playwright Firefox patch is already applied.
-
+- `localMappings` — optional hostname-to-directory map for static fixtures through Firefox 153+ DevTools Local Mode; relative directories resolve from the current working directory.
+- `patchFirefox` — set to `false` only when the required Playwright and Firefox patches are already applied; `localMappings` also requires the Firefox Local Mode compatibility patch.
 - `contextScope`: `'test'` by default, or `'worker'` to share one Firefox context for a Playwright worker.
 - `resolveProjectOptions`: maps the worker or test `project.use` settings to `headless` and `launchOptions`.
+
+For example, map separate HTTPS origins to local fixture directories without starting a server:
+
+```ts
+const test = createFirefoxFixtures(base, {
+  extensionPath: './dist-extension',
+  localMappings: {
+    'app.localhost': './tests/fixtures/app',
+    'assets.localhost': './tests/fixtures/assets'
+  }
+})
+```
+
+Each page gets its own Firefox RDP network watcher before it is returned to the test. The watcher is removed and its mappings cleared when its page closes; the harness also cleans up all remaining watchers before closing the Firefox context. Firefox Local Mode is isolated per context.
 
 ## Firefox compatibility and security
 
 Firefox RDP is an internal, version-sensitive protocol. Test against the Firefox revision used by your CI image. The harness uses the Firefox executable supplied by Playwright and creates a temporary profile for each run.
 
-The patch updates Playwright's Firefox resources only when needed. It enables Firefox Experiment APIs, allows Juggler access to `moz-extension://` documents, and locks `marionette.running` in `playwright.cfg`. Missing, ambiguous, or partially applied patch points fail as incompatible builds. The patch is idempotent.
+Firefox and Playwright bundle changes ship as standard unified diffs in `patches/`. The package's `postinstall` applies the Playwright bundle patch; `globalSetup` applies Firefox's root `omni.ja`, `browser/omni.ja`, and `playwright.cfg` patches. Patch application is idempotent, validates the complete patch set before writing, and atomically replaces each changed file. Incompatible or partially patched installations fail with an actionable error; legacy marker-based Firefox patches are not migrated.
 
-The package's `postinstall` script patches Playwright's CSS and role selector engines to traverse closed roots through `element.openOrClosedShadowRoot`. The Firefox patch installs that privileged getter on `Element.prototype` in Playwright's `__playwright_utility_world__` only. Page and extension worlds must not gain access to closed roots through the injected getter. This supports roots created in MAIN and ISOLATED worlds, including by document-start scripts. Missing, ambiguous, or partially applied patch points fail as incompatible builds.
+The Playwright patch makes CSS and role selectors traverse closed shadow roots through `element.openOrClosedShadowRoot`. The Firefox patch installs that privileged getter on `Element.prototype` in Playwright's `__playwright_utility_world__` only. Page and extension worlds must not gain access to closed roots through the injected getter. This supports roots created in MAIN and ISOLATED worlds, including by document-start scripts.
+
+`localMappings` requires Firefox 153+ and the `WatcherActor.getNetworkParentActor` / `NetworkParentActor.setLocalModeMappings` RDP capabilities. The Firefox Local Mode patch makes DevTools' Local Mode modules load their dependencies in Firefox's distinct DevTools global. Unsupported versions and missing capabilities are reported during harness setup.
 
 The RDP endpoint is local, privileged, unauthenticated, and unencrypted. The harness binds it to localhost; do not expose it to a LAN or the public Internet.
 
-This package intentionally does not include DuckDuckGo's XPCOM network interception, proxy wrappers, local mocking server, or unrelated experiment API patches.
+This package does not start an HTTP server or add XPCOM network hooks. `localMappings` uses Firefox's built-in DevTools Local Mode to serve static files.
 
 ## Development
 

@@ -37,6 +37,22 @@ The factory's `context` fixture forwards the same worker context to each test. W
 
 `resolveProjectOptions` maps Playwright `project.use` settings to Firefox launch options when a context is created. It runs once per test context or once per worker context, according to `contextScope`.
 
+### Firefox DevTools Local Mode
+
+Use `localMappings` to serve static directories on HTTPS hostnames without starting an HTTP server. Keys are hostnames without a scheme, port, or path; directory paths may be relative to the current working directory:
+
+```ts
+const test = createFirefoxFixtures(base, {
+  extensionPath: './dist-extension',
+  localMappings: {
+    'app.localhost': './tests/fixtures/app',
+    'assets.localhost': './tests/fixtures/assets'
+  }
+})
+```
+
+Firefox 153+ serves each mapped origin through its built-in DevTools Local Mode. The harness enables `network-event` watching and registers mappings before returning the fixture page or a page created with `context.newPage()`. Each page owns its watcher; closing a page clears its mappings and stops resource watching, and closing the context cleans up any remaining watchers.
+
 ## Extension handle
 
 The `extension` fixture exposes:
