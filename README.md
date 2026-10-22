@@ -70,6 +70,28 @@ export { expect } from '@playwright/test'
 
 The harness starts Firefox itself with a localhost RDP endpoint. It does not require a manually started Firefox process.
 
+For serial stateful suites, set `contextScope: 'worker'` to keep one Firefox context for the Playwright worker. Wrap the test with `withSharedPage` when tests must receive the same Playwright `Page` object:
+
+```ts
+import { test as base } from '@playwright/test'
+import {
+  createFirefoxFixtures,
+  withSharedPage
+} from '@openpolyfill/firefox-addon-playwright-harness/fixtures'
+
+const test = withSharedPage(
+  createFirefoxFixtures(base, {
+    extensionPath: './dist-extension',
+    headless: true,
+    contextScope: 'worker'
+  })
+)
+
+test.describe.configure({ mode: 'serial' })
+```
+
+The shared page retains its document state until the tests navigate or reset it. Do not close it before the worker finishes.
+
 ## Usage
 
 ```ts
@@ -146,6 +168,9 @@ The sidebar `Page` targets Firefox's inner `webext-panels-browser`, not the oute
 - `launchOptions` — additional Playwright persistent-context options.
 - `postInstallPages` — optional URL strings or regular expressions used to wait for startup pages.
 - `patchFirefox` — set to `false` only when the required Playwright Firefox patch is already applied.
+
+- `contextScope`: `'test'` by default, or `'worker'` to share one Firefox context for a Playwright worker.
+- `resolveProjectOptions`: maps the worker or test `project.use` settings to `headless` and `launchOptions`.
 
 ## Firefox compatibility and security
 

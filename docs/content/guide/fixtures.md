@@ -12,6 +12,31 @@ description: 'Use the page-bound extension helpers, explicit page contexts, and 
 - `extension` — the installed extension handle.
 - `rdp` — the connected `FirefoxRDP` client from `@openpolyfill/firefox-rdp`.
 
+## Context and page lifetime
+
+The default context scope is `test`, so each test gets a fresh Firefox context. Use `contextScope: 'worker'` for serial suites that intentionally retain browser and extension state across tests:
+
+```ts
+import { test as base } from '@playwright/test'
+import {
+  createFirefoxFixtures,
+  withSharedPage
+} from '@openpolyfill/firefox-addon-playwright-harness/fixtures'
+
+const test = withSharedPage(
+  createFirefoxFixtures(base, {
+    extensionPath: './dist-extension',
+    contextScope: 'worker'
+  })
+)
+
+test.describe.configure({ mode: 'serial' })
+```
+
+The factory's `context` fixture forwards the same worker context to each test. Without `withSharedPage`, its `page` fixture reuses a blank page and resets it to `about:blank` after each test. `withSharedPage` instead provides the same `Page` object to every test. That page retains DOM state until it is navigated or reset, and callers must not close it before the worker finishes.
+
+`resolveProjectOptions` maps Playwright `project.use` settings to Firefox launch options when a context is created. It runs once per test context or once per worker context, according to `contextScope`.
+
 ## Extension handle
 
 The `extension` fixture exposes:

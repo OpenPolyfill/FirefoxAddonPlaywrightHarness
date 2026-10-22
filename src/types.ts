@@ -4,6 +4,11 @@ import type { FirefoxRDP } from '@openpolyfill/firefox-rdp'
 export type ActionKind = 'browserAction' | 'pageAction'
 export type UrlMatcher = string | RegExp
 
+export interface FirefoxHarnessProjectOptions {
+  headless?: boolean
+  launchOptions?: Record<string, unknown>
+}
+
 export interface FirefoxHarnessConfig {
   extensionPath: string
   headless?: boolean
@@ -12,6 +17,13 @@ export interface FirefoxHarnessConfig {
   launchOptions?: Record<string, unknown>
   postInstallPages?: UrlMatcher[]
   patchFirefox?: boolean
+  /** Context lifetime. The default is one Firefox context per test. */
+  contextScope?: 'test' | 'worker'
+  /**
+   * Maps Playwright project settings to Firefox launch options.
+   * Called once per context, within the selected fixture scope.
+   */
+  resolveProjectOptions?: (projectUse: Record<string, unknown>) => FirefoxHarnessProjectOptions
 }
 
 export interface FirefoxLaunchResult {
