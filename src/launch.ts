@@ -6,6 +6,7 @@ import { acquireRdpPort } from './port.js'
 import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
 import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
 import { FirefoxRdpSession, RdpEvaluation } from './rdp.js'
+import { FirefoxErrorDiagnostics } from './diagnostics.js'
 import {
   configureNativeMessagingDirectory,
   prepareNativeMessagingHosts
@@ -22,7 +23,8 @@ import type {
   FirefoxHarnessConfig,
   FirefoxIsolatedPage,
   FirefoxLaunchResult,
-  ActionKind
+  ActionKind,
+  InternalFirefoxContext
 } from './types.js'
 
 const requiredPrefs: Record<string, boolean | number> = {
@@ -64,6 +66,7 @@ export async function launchFirefoxExtension(
   let context: BrowserContext | undefined
   let session: FirefoxRdpSession | undefined
   let extension: FirefoxExtension | undefined
+  let diagnostics: FirefoxErrorDiagnostics | undefined
   let localMode: FirefoxLocalModeController | undefined
   let nativeManifestBaseDir: string | undefined
   try {
@@ -78,6 +81,9 @@ export async function launchFirefoxExtension(
       launchOptions(config, releasePort.port)
     )
     session = await FirefoxRdpSession.connect(releasePort.port)
+    diagnostics = new FirefoxErrorDiagnostics(session)
+    await diagnostics.start()
+    ;(context as InternalFirefoxContext)._firefoxHarnessDiagnostics = diagnostics
     if (nativeManifestBaseDir) {
       const chromeTarget = session.chromeTarget
       if (!chromeTarget)
@@ -85,12 +91,14 @@ export async function launchFirefoxExtension(
       await configureNativeMessagingDirectory(session.rdp, chromeTarget, nativeManifestBaseDir)
     }
     const installed = await session.installExtension(extensionPath)
+    diagnostics.setExtensionId(installed.id)
     extension = new FirefoxExtensionHandle(
       session,
       context,
       installed.id,
       extensionPath,
-      installed.background
+      installed.background,
+      diagnostics
     )
     localMode = await attachFirefoxLocalMappings(context, session.rdp, localMappings)
 
@@ -113,6 +121,7 @@ export async function launchFirefoxExtension(
     }
     return result
   } catch (error) {
+    await diagnostics?.close()
     await localMode?.close().catch(() => {})
     session?.close()
     await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
@@ -134,7 +143,8 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     private readonly browserContext: BrowserContext,
     readonly id: string,
     readonly installPath: string,
-    background: RdpEvaluation | undefined
+    background: RdpEvaluation | undefined,
+    private readonly diagnostics: FirefoxErrorDiagnostics
   ) {
     this.background = background
     this.isolatedContexts = new RdpIsolatedNamespace(session, id)
@@ -344,6 +354,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
 
   async close(): Promise<void> {
     this.closed = true
+    await this.diagnostics.close()
     this.session.close()
   }
 }

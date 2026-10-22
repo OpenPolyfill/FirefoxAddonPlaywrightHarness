@@ -18,6 +18,7 @@ Extensions without a background page or worker install normally; `extension.back
 - Browser action, page action, and extension sidebar activation as Playwright `Page` targets.
 - Popup and sidebar input, locators, screenshots, events, and close lifecycle through Playwright.
 - Idempotent Playwright Firefox patching for extension documents and experiment APIs.
+- Automatic capture of uncaught exceptions and error-level console messages from Firefox extension backgrounds, content scripts, and browser chrome, attached to failed tests.
 
 ## Installation
 

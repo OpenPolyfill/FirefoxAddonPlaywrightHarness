@@ -37,6 +37,12 @@ The factory's `context` fixture forwards the same worker context to each test. W
 
 `resolveProjectOptions` maps Playwright `project.use` settings to Firefox launch options when a context is created. It runs once per test context or once per worker context, according to `contextScope`.
 
+## Automatic Firefox error diagnostics
+
+The harness listens to Firefox RDP console events from extension background targets, extension content scripts, and browser chrome. Uncaught exceptions and error-level console messages are recorded with a timestamp, execution context, extension ID or source URL when available, message, and stack trace.
+
+When a test fails or times out, Playwright receives a `firefox-error-diagnostics.json` attachment containing the diagnostics collected for that test. Collection starts during browser setup so extension startup errors are included. Buffers are bounded and cleared between tests, including when `contextScope: 'worker'` reuses a Firefox instance.
+
 ### Firefox DevTools Local Mode
 
 Use `localMappings` to serve static directories on HTTPS hostnames without starting an HTTP server. Keys are hostnames without a scheme, port, or path; directory paths may be relative to the current working directory:

@@ -1,5 +1,6 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import type { FirefoxRDP } from '@openpolyfill/firefox-rdp'
+import type { FirefoxErrorDiagnostics } from './diagnostics.js'
 
 export type ActionKind = 'browserAction' | 'pageAction'
 export type UrlMatcher = string | RegExp
@@ -96,6 +97,7 @@ export interface FirefoxExtension {
 }
 
 export interface InternalFirefoxContext extends BrowserContext {
+  _firefoxHarnessDiagnostics?: FirefoxErrorDiagnostics
   _firefoxHarness?: {
     rdp: FirefoxRDP
     extension: FirefoxExtension

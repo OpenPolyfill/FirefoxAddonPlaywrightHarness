@@ -1,0 +1,20 @@
+{
+  "manifest_version": 2,
+  "name": "Harness diagnostics fixture",
+  "version": "1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "harness-diagnostics@openpolyfill.test"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://example.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ]
+}

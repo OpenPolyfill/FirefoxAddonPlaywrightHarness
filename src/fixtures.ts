@@ -97,7 +97,35 @@ export function createFirefoxFixtures<
       } finally {
         if (contextScope === 'worker' && !page.isClosed()) await page.goto('about:blank')
       }
-    }
+    },
+    firefoxErrorDiagnostics: [
+      async (
+        { context }: { context: InternalFirefoxContext },
+        use: FixtureUse<void>,
+        testInfo: TestInfo
+      ) => {
+        const diagnostics = context._firefoxHarnessDiagnostics
+        diagnostics?.beginTest()
+        try {
+          await use(undefined)
+        } finally {
+          try {
+            if (diagnostics && testInfo.errors.length > 0) {
+              const body = Buffer.from(JSON.stringify(diagnostics.snapshot(), null, 2))
+              await testInfo
+                .attach('firefox-error-diagnostics.json', {
+                  body,
+                  contentType: 'application/json'
+                })
+                .catch(() => undefined)
+            }
+          } finally {
+            diagnostics?.endTest()
+          }
+        }
+      },
+      { auto: true as const }
+    ]
   }
 
   return test.extend<FirefoxFixtures, WorkerFirefoxFixtures>(
