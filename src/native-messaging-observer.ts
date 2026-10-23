@@ -138,7 +138,7 @@ function buildObserverBootstrap(modes: Record<string, NativeMessagingObserverMod
           const length = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
           if (length > maxLength || length + 4 !== bytes.byteLength)
             throw new Error('Invalid mutated Native Messaging frame length')
-          return bytes.slice(4)
+          return bytes.subarray(4)
         },
         encode(bytes) {
           const data = this.asBytes(bytes)
@@ -170,7 +170,7 @@ function buildObserverBootstrap(modes: Record<string, NativeMessagingObserverMod
         },
         inspect(sessionId, channel, value) {
           const session = this.sessions.get(sessionId)
-          const bytes = this.asBytes(value).slice()
+          const bytes = this.asBytes(value)
           if (!session) return Promise.resolve(bytes)
           session.observed++
           const eventId = this.nextEventId++
@@ -469,7 +469,7 @@ export class NativeMessagingSession extends EventEmitter {
   }
 
   private _message(direction: NativeMessagingDirection, raw: Buffer, message: unknown): void {
-    const observed: NativeMessagingMessage = { direction, message, raw: Buffer.from(raw) }
+    const observed: NativeMessagingMessage = { direction, message, raw }
     this.retainHistory(observed)
     const waiterIndex = this.messageWaiters.findIndex(
       (waiter) => waiter.direction === undefined || waiter.direction === direction
@@ -692,7 +692,7 @@ export class NativeMessagingObserver extends EventEmitter {
       hostName: event.hostName,
       pid: event.pid,
       channel: event.channel,
-      bytes: Buffer.from(bytes),
+      bytes,
       session
     }
     this.emit('data', streamEvent)
@@ -710,9 +710,13 @@ export class NativeMessagingObserver extends EventEmitter {
       })
       return
     }
-    void Promise.resolve(config.onData(streamEvent)).catch((error) => {
+    try {
+      void Promise.resolve(config.onData(streamEvent)).catch((error) => {
+        this.emit('observerError', error)
+      })
+    } catch (error) {
       this.emit('observerError', error)
-    })
+    }
   }
 
   private async handleBlockingData(
@@ -726,7 +730,10 @@ export class NativeMessagingObserver extends EventEmitter {
     } catch (error) {
       this.emit('observerError', error)
     }
-    const bytes = replacement instanceof Uint8Array ? Buffer.from(replacement) : streamEvent.bytes
+    const bytes =
+      replacement instanceof Uint8Array
+        ? Buffer.from(replacement.buffer, replacement.byteOffset, replacement.byteLength)
+        : streamEvent.bytes
     await this.respond(event.eventId, bytes)
   }
 
