@@ -5,7 +5,7 @@ import type { Page } from '@playwright/test'
 const extensionPath = new URL('../fixtures/no-background-browser-action', import.meta.url).pathname
 const closedShadowPropertyName = 'openOrClosedShadowRoot'
 
-const test = createFirefoxFixtures(baseTest, { extensionPath, headless: true })
+const test = createFirefoxFixtures(baseTest, { extensionPaths: [extensionPath], headless: true })
 
 async function openHostPage(page: Page): Promise<void> {
   await page.route('https://example.com/**', (route) =>
@@ -76,8 +76,9 @@ async function assertGetterIsUtilityWorldOnly(
 
 test('Playwright locators pierce a page-created closed root without exposing the utility getter', async ({
   page,
-  extension
+  extensions
 }) => {
+  const extension = extensions.values().next().value!
   await openHostPage(page)
   await page.evaluate(() => {
     const root = document.querySelector('#host')!.attachShadow({ mode: 'closed' })
@@ -92,8 +93,9 @@ test('Playwright locators pierce a page-created closed root without exposing the
 
 test('Playwright locators pierce a closed root created from the isolated evaluator', async ({
   page,
-  extension
+  extensions
 }) => {
+  const extension = extensions.values().next().value!
   await openHostPage(page)
   await extension.isolated.evaluate(() => {
     const root = document.querySelector('#host')!.attachShadow({ mode: 'closed' })
@@ -109,8 +111,9 @@ test('Playwright locators pierce a closed root created from the isolated evaluat
 })
 test('Juggler installs the getter in pages created after harness startup', async ({
   page,
-  extension
+  extensions
 }) => {
+  const extension = extensions.values().next().value!
   const laterPage = await page.context().newPage()
   await openHostPage(laterPage)
   await laterPage.evaluate(() => {

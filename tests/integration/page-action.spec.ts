@@ -1,14 +1,15 @@
 import { baseTest, createFirefoxFixtures, expect } from './fixtures.js'
 
 const test = createFirefoxFixtures(baseTest, {
-  extensionPath: new URL('../fixtures/page-action-extension', import.meta.url).pathname,
+  extensionPaths: [new URL('../fixtures/page-action-extension', import.meta.url).pathname],
   headless: true
 })
 
 test('pageAction popup is a Playwright Page bound to the active tab and popup lifecycle', async ({
   page,
-  extension
+  extensions
 }) => {
+  const extension = extensions.values().next().value!
   await page.goto('https://example.com/')
   expect(await extension.background.evaluate(() => browser.runtime.id)).toBe(extension.id)
 

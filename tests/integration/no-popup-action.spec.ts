@@ -1,14 +1,15 @@
 import { baseTest, createFirefoxFixtures, expect } from './fixtures.js'
 
 const test = createFirefoxFixtures(baseTest, {
-  extensionPath: new URL('../fixtures/no-popup-browser-action', import.meta.url).pathname,
+  extensionPaths: [new URL('../fixtures/no-popup-browser-action', import.meta.url).pathname],
   headless: true
 })
 
 test('activates a popupless browser action without bypassing its disabled state', async ({
   page,
-  extension
+  extensions
 }) => {
+  const extension = extensions.values().next().value!
   const background = extension.background
   if (!background) throw new Error('Browser action fixture has no background context')
 

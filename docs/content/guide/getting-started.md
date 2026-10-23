@@ -35,14 +35,14 @@ The harness starts Firefox itself with a temporary profile and a localhost-only 
 
 ## Create fixtures
 
-Pass the unpacked extension directory or packed XPI path to `createFirefoxFixtures`:
+Pass an array of unpacked extension directories and/or packed XPI paths to `createFirefoxFixtures`:
 
 ```ts
 import { test as baseTest, expect } from '@playwright/test'
 import { createFirefoxFixtures } from '@openpolyfill/firefox-addon-playwright-harness/fixtures'
 
 export const test = createFirefoxFixtures(baseTest, {
-  extensionPath: './dist-extension',
+  extensionPaths: ['./dist-extension'],
   headless: true
 })
 
@@ -54,7 +54,8 @@ Then use the fixtures in a test:
 ```ts
 import { test, expect } from './fixtures.js'
 
-test('extension is installed', async ({ extension }) => {
+test('extension is installed', async ({ extensions }) => {
+  const extension = extensions.values().next().value!
   expect(extension.id).toBeTruthy()
   expect(await extension.background.evaluate(() => browser.runtime.id)).toBe(extension.id)
 })

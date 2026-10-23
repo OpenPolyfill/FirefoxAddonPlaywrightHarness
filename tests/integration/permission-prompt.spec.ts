@@ -2,15 +2,16 @@ import type { Page } from '@playwright/test'
 import { createFirefoxFixtures, baseTest, expect } from './fixtures.js'
 
 const test = createFirefoxFixtures(baseTest, {
-  extensionPath: new URL('../fixtures/permission-prompt-extension', import.meta.url).pathname,
+  extensionPaths: [new URL('../fixtures/permission-prompt-extension', import.meta.url).pathname],
   headless: true
 })
 
 test('dismisses and denies the WebExtension permission prompt from chromePage', async ({
   page,
-  extension,
+  extensions,
   chromePage
 }) => {
+  const extension = extensions.values().next().value!
   const prompt = chromePage.locator('#addon-webext-permissions-notification')
   const deny = prompt.locator('.popup-notification-secondary-button')
   const request = async (popup: Page) => {

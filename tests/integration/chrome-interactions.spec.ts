@@ -2,7 +2,7 @@ import type { BrowserContext, Page } from '@playwright/test'
 import { createFirefoxFixtures, baseTest, expect } from './fixtures.js'
 
 const test = createFirefoxFixtures(baseTest, {
-  extensionPath: new URL('../fixtures/browser-action-extension', import.meta.url).pathname,
+  extensionPaths: [new URL('../fixtures/browser-action-extension', import.meta.url).pathname],
   headless: true
 })
 

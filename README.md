@@ -2,19 +2,19 @@
 
 ## About
 
-A TypeScript Playwright harness for testing Firefox WebExtensions. It launches Firefox with an isolated persistent profile, installs the extension through Firefox RDP, evaluates background and page code when a background target exists, and exposes action popup and sidebar helpers.
+A TypeScript Playwright harness for testing multiple Firefox WebExtensions simultaneously. It launches Firefox with an isolated persistent profile, installs configured and runtime extensions through Firefox RDP, evaluates background and page code when a background target exists, and exposes action popup and sidebar helpers.
 
 ### Background-less extensions
 
-Extensions without a background page or worker install normally; `extension.background` is `undefined`. Browser and page action popups and extension sidebars are activated through privileged Firefox chrome code and do not require a background context.
+Extensions without a background page or worker install normally; the selected handle's `background` is `undefined`. Browser and page action popups and extension sidebars are activated through privileged Firefox chrome code and do not require a background context.
 
 ## Features
 
 - Isolated Firefox profile per harness instance.
-- Temporary extension installation through Firefox RDP from an unpacked directory or packed XPI.
-- Optional background evaluation through `extension.background` for extensions with background pages or workers.
-- Page-bound isolated evaluation through `extension.isolated`.
-- Explicit page contexts through `extension.isolatedContexts.get(page)`.
+- Temporary installation of multiple extensions through Firefox RDP from unpacked directories or packed XPIs.
+- Optional background evaluation through each handle's `background` for extensions with background pages or workers.
+- Page-bound isolated evaluation through each handle's `isolated`.
+- Explicit page contexts through each handle's `isolatedContexts.get(page)`.
 - Browser action, page action, and extension sidebar activation as Playwright `Page` targets.
 - Popup and sidebar input, locators, screenshots, events, and close lifecycle through Playwright.
 - `chromePage` exposes the primary `browser.xhtml` window as a Playwright `Page`; embedded Firefox UI documents are also registered as Pages.
@@ -55,7 +55,7 @@ export default defineConfig({
 })
 ```
 
-Create extension-aware fixtures by passing an unpacked extension directory or packed XPI path to the factory:
+Create extension-aware fixtures by passing an array of unpacked extension directories and/or packed XPI paths to the factory:
 
 ```ts
 // tests/fixtures.ts
@@ -63,12 +63,14 @@ import { test as baseTest } from '@playwright/test'
 import { createFirefoxFixtures } from '@openpolyfill/firefox-addon-playwright-harness/fixtures'
 
 export const test = createFirefoxFixtures(baseTest, {
-  extensionPath: './dist-extension',
+  extensionPaths: ['./extensions/webhid', './extensions/webkeyboard.xpi'],
   headless: true
 })
 
 export { expect } from '@playwright/test'
 ```
+
+Pass `extensionPaths: []` when all extensions will be installed at runtime through `extensions.install(path)`.
 
 The harness starts Firefox itself with a localhost RDP endpoint. It does not require a manually started Firefox process.
 
@@ -83,7 +85,7 @@ import {
 
 const test = withSharedPage(
   createFirefoxFixtures(base, {
-    extensionPath: './dist-extension',
+    extensionPaths: ['./dist-extension'],
     headless: true,
     contextScope: 'worker'
   })
@@ -99,7 +101,8 @@ The shared page retains its document state until the tests navigate or reset it.
 ```ts
 import { test, expect } from './fixtures.js'
 
-test('background, isolated page, and browser action', async ({ page, extension }) => {
+test('background, isolated page, and browser action', async ({ page, extensions }) => {
+  const extension = extensions.values().next().value!
   await page.goto('https://example.test')
 
   expect(await extension.background.evaluate(() => browser.runtime.id)).toBe(extension.id)
@@ -134,14 +137,54 @@ test('inspect Firefox through RDP', async ({ rdp }) => {
 })
 ```
 
-The `extension` fixture includes:
+The `extensions` fixture exposes the installed extensions as a read-only Map-like collection keyed by Gecko extension ID:
 
-- `background` — evaluator for the extension background context.
-- `isolated` — evaluator bound to the current fixture `page`.
-- `isolatedContexts.get(page)` — evaluator factory for another Playwright page.
-- `activateAction(page, kind)` and `waitForPopup()` — open or wait for an action popup. Pass `{ waitForPopup: false }` for click-only actions.
-- `activateSidebar(page)` — open the extension sidebar and return its Playwright `Page`.
-- `id`, `installPath`, and `close()` — extension identity and lifecycle.
+- `extensions.get(id)!` selects a known extension; `extensions.has(id)` checks collection membership.
+- `extensions.values().next().value!` selects the first extension when its ID is unknown.
+- `extensions.install(path)` installs a directory or XPI at runtime and returns its handle.
+- Each handle exposes `background`, `isolated`, `isolatedContexts.get(page)`, `activateAction(page, kind)`, `waitForPopup()`, `activateSidebar(page)`, `reload()`, `enable()`, `disable()`, `uninstall()`, `id`, and `installPath`.
+- `uninstall()` removes the extension from Firefox and from the collection. `close()` is also available on the handle and uninstalls that extension.
+
+For example, use `extensions.get('example@example.org')!` to select a specific extension, then call its lifecycle methods. Handles retain their identity across reload, disable, and enable.
+
+```ts
+test('install an extension at runtime', async ({ extensions }) => {
+  const added = await extensions.install('./extensions/another.xpi')
+  expect(extensions.has(added.id)).toBe(true)
+  await added.uninstall()
+  expect(extensions.has(added.id)).toBe(false)
+})
+```
+
+The Firefox fixtures also include `chromePage` for the primary browser chrome window and `chromePages()` for rediscovering all open browser chrome windows. Each is a real Playwright `Page`; use locators on `chromePage` for UI hosted in the same XUL document. Embedded privileged UI documents in separate `<browser>` elements are exposed as additional Pages, while ordinary iframes remain `Frame` objects.
+
+The selected extension's `isolated` evaluator is bound to the fixture's current `page` and follows it across navigations. Use `extension.isolatedContexts.get(otherPage)` when the evaluation must target a specific Playwright page:
+
+```ts
+const otherPage = await page.context().newPage()
+await otherPage.goto('https://example.org')
+
+const otherPageIsolated = extension.isolatedContexts.get(otherPage)
+expect(await otherPageIsolated.evaluate(() => location.hostname)).toBe('example.org')
+```
+
+Activate an action with either supported action kind:
+
+```ts
+const browserPopup = await extension.activateAction(page, 'browserAction')
+const pagePopup = await extension.activateAction(page, 'pageAction')
+```
+
+`activateAction` brings the specified Playwright page to the foreground and invokes the WebExtension action. By default it returns the popup's actual Playwright page. Pass `{ waitForPopup: false }` for click-only actions, which returns `void` after triggering Firefox's action handler without waiting for a popup.
+
+For an extension that declares `sidebar_action`, open the sidebar as a Playwright page:
+
+```ts
+const sidebar = await extension.activateSidebar(page)
+await sidebar.getByRole('textbox').fill('search text')
+```
+
+The sidebar `Page` targets Firefox's inner `webext-panels-browser`, not the outer browser that hosts `webext-panels.xhtml`. Calling `sidebar.close()` hides the sidebar and closes its Playwright page.
 
 The Firefox fixtures also include `chromePage` for the primary browser chrome window and `chromePages()` for rediscovering all open browser chrome windows. Each is a real Playwright `Page`; use locators on `chromePage` for UI hosted in the same XUL document. Embedded privileged UI documents in separate `<browser>` elements are exposed as additional Pages, while ordinary iframes remain `Frame` objects.
 
@@ -179,7 +222,7 @@ The sidebar `Page` targets Firefox's inner `webext-panels-browser`, not the oute
 
 `createFirefoxFixtures` accepts the following configuration:
 
-- `extensionPath` — required path to an unpacked extension directory or packed XPI file.
+- `extensionPaths` — required array of paths to unpacked extension directories or packed XPI files.
 - `headless` — launch Firefox headlessly.
 - `firefoxUserPrefs` — additional Firefox preferences; harness-required preferences take precedence.
 - `args` — additional Firefox command-line arguments.
@@ -196,7 +239,7 @@ For example, map separate HTTPS origins to local fixture directories without sta
 
 ```ts
 const test = createFirefoxFixtures(base, {
-  extensionPath: './dist-extension',
+  extensionPaths: ['./dist-extension'],
   localMappings: {
     'app.localhost': './tests/fixtures/app',
     'assets.localhost': './tests/fixtures/assets'

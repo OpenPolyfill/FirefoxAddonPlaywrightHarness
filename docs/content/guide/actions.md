@@ -3,6 +3,12 @@ title: 'Actions, sidebars, and popups'
 description: 'Activate browser actions, page actions, and extension sidebars as Playwright pages.'
 ---
 
+Each example operates on a handle selected from the `extensions` fixture:
+
+```ts
+const extension = extensions.get('example@example.org')!
+```
+
 ## Browser actions
 
 Activate a browser action and use the returned popup as an ordinary Playwright

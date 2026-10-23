@@ -5,12 +5,12 @@ description: 'Playwright fixtures for testing Firefox WebExtensions through Fire
 
 **A Playwright harness for Firefox WebExtension integration tests.**
 
-Launch an isolated Firefox profile, install an extension from an unpacked directory or packed XPI, inspect the background context, evaluate page code, activate browser/page actions, and access the underlying Firefox RDP client from one fixture set.
+Launch an isolated Firefox profile, install multiple extensions from directories or packed XPIs, inspect their background contexts, evaluate page code, activate browser/page actions, and access the underlying Firefox RDP client from one fixture set.
 
 ## Start here
 
 - [Getting started](/docs/guide/getting-started) — install the package and create fixtures.
-- [Fixtures and evaluation](/docs/guide/fixtures) — use `background`, `isolated`, and the raw `rdp` client.
+- [Fixtures and evaluation](/docs/guide/fixtures) — use the `extensions` collection, background and isolated evaluators, and raw `rdp` client.
 - [Actions and popups](/docs/guide/actions) — open browser actions and page actions in headless Firefox.
 - [RDP access](/docs/guide/rdp) — use the `FirefoxRDP` client for low-level protocol operations.
 - [API reference](/docs/api) — browse the public TypeScript API and generated declarations.

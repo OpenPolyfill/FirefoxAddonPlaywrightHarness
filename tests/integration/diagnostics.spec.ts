@@ -3,7 +3,7 @@ import type { FirefoxErrorDiagnostic } from '../../src/diagnostics.js'
 import type { InternalFirefoxContext } from '../../src/types.js'
 
 const test = createFirefoxFixtures(baseTest, {
-  extensionPath: new URL('../fixtures/diagnostics-extension', import.meta.url).pathname,
+  extensionPaths: [new URL('../fixtures/diagnostics-extension', import.meta.url).pathname],
   headless: true,
   contextScope: 'worker'
 })
@@ -12,10 +12,11 @@ test.describe.configure({ mode: 'serial' })
 
 test('collects startup, content-script, and browser-chrome errors', async ({
   context,
-  extension,
+  extensions,
   page,
   rdp
 }) => {
+  const extension = extensions.values().next().value!
   const diagnostics = (context as InternalFirefoxContext)._firefoxHarnessDiagnostics
   expect(diagnostics).toBeTruthy()
   if (!diagnostics) throw new Error('Firefox error diagnostics were not initialized')

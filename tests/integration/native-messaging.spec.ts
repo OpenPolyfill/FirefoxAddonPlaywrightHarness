@@ -35,7 +35,7 @@ const observeNativeMessagingHost = {
 }
 
 const workerTest = createFirefoxFixtures(baseTest, {
-  extensionPath,
+  extensionPaths: [extensionPath],
   headless: true,
   contextScope: 'worker',
   nativeMessagingHosts: nativeMessagingHosts('Worker-scoped native host'),
@@ -91,7 +91,8 @@ async function readRawBytes(stream: Readable): Promise<Buffer> {
 
 workerTest(
   'discovers its isolated manifest and captures one-shot native messaging',
-  async ({ context, extension, nativeMessaging }) => {
+  async ({ context, extensions, nativeMessaging }) => {
+    const extension = extensions.values().next().value!
     const manifestDirectory = nativeManifestDirectory(context)
     const manifestPath = join(manifestDirectory, `${nativeHostName}.json`)
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
@@ -154,7 +155,8 @@ workerTest(
 
 workerTest(
   'keeps connectNative open and observes multiple bidirectional messages',
-  async ({ extension, nativeMessaging }) => {
+  async ({ extensions, nativeMessaging }) => {
+    const extension = extensions.values().next().value!
     if (!extension.background)
       throw new Error('Native messaging extension has no background context')
     const sessionCount = nativeMessaging.sessions.length
@@ -224,7 +226,8 @@ workerTest(
 
 workerTest(
   'captures stderr and decodes partially written Native Messaging frames',
-  async ({ extension, nativeMessaging }) => {
+  async ({ extensions, nativeMessaging }) => {
+    const extension = extensions.values().next().value!
     const request = {
       text: 'partial-frame',
       stderr: 'diagnostic from native host\\n',
@@ -265,13 +268,15 @@ workerTest(
 
 baseTest('registered native hosts are not observed without per-name opt-in', async () => {
   const running = await launchFirefoxExtension({
-    extensionPath,
+    extensionPaths: [extensionPath],
     headless: true,
     nativeMessagingHosts: nativeMessagingHosts('Unobserved native host')
   })
   let pid: number | undefined
   try {
-    const response = await sendNativeMessage(running.extension, { text: 'not-observed' })
+    const response = await sendNativeMessage(running.extensions.values().next().value!, {
+      text: 'not-observed'
+    })
     pid = response.pid
     expect(response.message).toEqual({ text: 'not-observed' })
     expect(running.nativeMessaging.sessions).toHaveLength(0)
@@ -284,7 +289,7 @@ baseTest('registered native hosts are not observed without per-name opt-in', asy
 
 baseTest('blocking Native Messaging observers can mutate both stream directions', async () => {
   const running = await launchFirefoxExtension({
-    extensionPath,
+    extensionPaths: [extensionPath],
     headless: true,
     nativeMessagingHosts: nativeMessagingHosts('Blocking native host'),
     nativeMessagingObservers: {
@@ -314,7 +319,7 @@ baseTest('blocking Native Messaging observers can mutate both stream directions'
   let pid: number | undefined
   try {
     const [response, session] = await Promise.all([
-      sendNativeMessage(running.extension, request),
+      sendNativeMessage(running.extensions.values().next().value!, request),
       sessionPromise
     ])
     pid = response.pid
@@ -336,7 +341,7 @@ baseTest('writes valid native manifests without probing executable paths', async
   const missingExecutable = join(tmpdir(), `openpolyfill-missing-native-host-${process.pid}`)
   await rm(missingExecutable, { force: true })
   const running = await launchFirefoxExtension({
-    extensionPath,
+    extensionPaths: [extensionPath],
     headless: true,
     nativeMessagingHosts: nativeMessagingHosts('Missing native binary', missingExecutable)
   })
@@ -357,7 +362,7 @@ baseTest('writes valid native manifests without probing executable paths', async
 
 baseTest('fixture teardown stops an open native host and removes private manifests', async () => {
   const running = await launchFirefoxExtension({
-    extensionPath,
+    extensionPaths: [extensionPath],
     headless: true,
     nativeMessagingHosts: nativeMessagingHosts('Teardown native host'),
     nativeMessagingObservers: observeNativeMessagingHost
@@ -365,10 +370,11 @@ baseTest('fixture teardown stops an open native host and removes private manifes
   let pid: number | undefined
   let closed = false
   try {
-    if (!running.extension.background)
+    const extension = running.extensions.values().next().value!
+    if (!extension.background)
       throw new Error('Native messaging extension has no background context')
     const [response, session] = await Promise.all([
-      running.extension.background.evaluate<NativeHostReply>(`(() => new Promise(resolve => {
+      extension.background.evaluate<NativeHostReply>(`(() => new Promise(resolve => {
         const port = browser.runtime.connectNative(${JSON.stringify(nativeHostName)});
         globalThis.__harnessOpenNativePort = port;
         port.onMessage.addListener(resolve);
@@ -401,13 +407,13 @@ baseTest('fixture teardown stops an open native host and removes private manifes
 baseTest('isolates same-name hosts across concurrent Firefox worker contexts', async () => {
   const launches = await Promise.allSettled([
     launchFirefoxExtension({
-      extensionPath,
+      extensionPaths: [extensionPath],
       headless: true,
       nativeMessagingHosts: nativeMessagingHosts('First worker host'),
       nativeMessagingObservers: observeNativeMessagingHost
     }),
     launchFirefoxExtension({
-      extensionPath,
+      extensionPaths: [extensionPath],
       headless: true,
       nativeMessagingHosts: nativeMessagingHosts('Second worker host'),
       nativeMessagingObservers: observeNativeMessagingHost
@@ -437,8 +443,8 @@ baseTest('isolates same-name hosts across concurrent Firefox worker contexts', a
       timeout: 5_000
     })
     const [firstResponse, secondResponse, firstSession, secondSession] = await Promise.all([
-      sendNativeMessage(first.extension, { worker: 'first' }),
-      sendNativeMessage(second.extension, { worker: 'second' }),
+      sendNativeMessage(first.extensions.values().next().value!, { worker: 'first' }),
+      sendNativeMessage(second.extensions.values().next().value!, { worker: 'second' }),
       firstSessionPromise,
       secondSessionPromise
     ])

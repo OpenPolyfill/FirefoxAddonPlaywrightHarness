@@ -1,7 +1,7 @@
 import type { BrowserContext, Page, TestInfo, TestType, WorkerInfo } from '@playwright/test'
 import type { FirefoxRDP } from '@openpolyfill/firefox-rdp'
-import { bindFirefoxExtensionPage, launchFirefoxExtension } from './launch.js'
-import type { FirefoxExtension, FirefoxHarnessConfig, InternalFirefoxContext } from './types.js'
+import { bindFirefoxExtensionsPage, launchFirefoxExtension } from './launch.js'
+import type { FirefoxExtensions, FirefoxHarnessConfig, InternalFirefoxContext } from './types.js'
 import type { NativeMessagingObserver } from './native-messaging-observer.js'
 
 export interface FirefoxFixtures {
@@ -9,7 +9,7 @@ export interface FirefoxFixtures {
   page: Page
   chromePage: Page
   chromePages: () => Promise<Page[]>
-  extension: FirefoxExtension
+  extensions: FirefoxExtensions
   rdp: FirefoxRDP
   nativeMessaging: NativeMessagingObserver
 }
@@ -129,14 +129,14 @@ export function createFirefoxFixtures<
     ) => {
       await use(() => getFirefoxChromePages(context))
     },
-    extension: async (
+    extensions: async (
       { context, page }: { context: InternalFirefoxContext; page: Page },
-      use: FixtureUse<FirefoxExtension>
+      use: FixtureUse<FirefoxExtensions>
     ) => {
       const harness = context._firefoxHarness
       if (!harness) throw new Error('Firefox harness context is not initialized')
-      bindFirefoxExtensionPage(harness.extension, page)
-      await use(harness.extension)
+      bindFirefoxExtensionsPage(harness.extensions, page)
+      await use(harness.extensions)
     },
     rdp: async ({ context }: { context: InternalFirefoxContext }, use: FixtureUse<FirefoxRDP>) => {
       const harness = context._firefoxHarness
@@ -222,7 +222,7 @@ async function launchHarnessContext(
 ): Promise<HarnessContext> {
   const projectOptions = config.resolveProjectOptions?.(projectUse)
   const running = await launchFirefoxExtension({
-    extensionPath: config.extensionPath,
+    extensionPaths: config.extensionPaths,
     headless: projectOptions?.headless ?? config.headless,
     firefoxUserPrefs: config.firefoxUserPrefs,
     args: config.args,
@@ -239,7 +239,7 @@ async function launchHarnessContext(
   const context = running.context as InternalFirefoxContext
   context._firefoxHarness = {
     rdp: running.rdp,
-    extension: running.extension,
+    extensions: running.extensions,
     nativeMessaging: running.nativeMessaging,
     userDataDir: running.userDataDir
   }

@@ -10,9 +10,9 @@ import { baseTest, createFirefoxFixtures, expect } from './fixtures.js'
 const extensionPath = fileURLToPath(new URL('../fixtures/document-start-mv3', import.meta.url))
 const closedShadowPropertyName = 'openOrClosedShadowRoot'
 const packedExtensionPath = join(tmpdir(), `document-start-mv3-${randomUUID()}.xpi`)
-const test = createFirefoxFixtures(baseTest, { extensionPath, headless: true })
+const test = createFirefoxFixtures(baseTest, { extensionPaths: [extensionPath], headless: true })
 const packedTest = createFirefoxFixtures(baseTest, {
-  extensionPath: packedExtensionPath,
+  extensionPaths: [packedExtensionPath],
   headless: true
 })
 

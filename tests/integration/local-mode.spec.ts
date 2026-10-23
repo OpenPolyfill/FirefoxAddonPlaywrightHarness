@@ -6,7 +6,7 @@ const localOne = new URL('../fixtures/local-mode-one', import.meta.url).pathname
 const localTwo = new URL('../fixtures/local-mode-two', import.meta.url).pathname
 
 const test = createFirefoxFixtures(baseTest, {
-  extensionPath,
+  extensionPaths: [extensionPath],
   headless: true,
   localMappings: {
     'local-one.localhost': localOne,
@@ -42,12 +42,12 @@ test('serves multiple static origins and prepares each page before navigation', 
 baseTest('keeps identical origins isolated across concurrent Firefox contexts', async () => {
   const launches = await Promise.allSettled([
     launchFirefoxExtension({
-      extensionPath,
+      extensionPaths: [extensionPath],
       headless: true,
       localMappings: { 'shared.localhost': localOne }
     }),
     launchFirefoxExtension({
-      extensionPath,
+      extensionPaths: [extensionPath],
       headless: true,
       localMappings: { 'shared.localhost': localTwo }
     })

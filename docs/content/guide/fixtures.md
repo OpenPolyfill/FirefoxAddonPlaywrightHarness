@@ -9,7 +9,7 @@ description: 'Use page-bound helpers, Firefox chrome Pages, explicit page contex
 
 - `context` — the isolated persistent Firefox context.
 - `page` — the current test page.
-- `extension` — the installed extension handle.
+- `extensions` — Map-like collection of installed extension handles, keyed by Gecko ID.
 - `rdp` — the connected `FirefoxRDP` client from `@openpolyfill/firefox-rdp`.
 - `chromePage` — the primary Firefox `browser.xhtml` window as a Playwright `Page`.
 - `chromePages()` — returns the currently open browser chrome Pages.
@@ -28,7 +28,7 @@ import {
 
 const test = withSharedPage(
   createFirefoxFixtures(base, {
-    extensionPath: './dist-extension',
+    extensionPaths: ['./dist-extension'],
     contextScope: 'worker'
   })
 )
@@ -88,8 +88,7 @@ When a test fails or times out, Playwright receives a `firefox-error-diagnostics
 Use `localMappings` to serve static directories on HTTPS hostnames without starting an HTTP server. Keys are hostnames without a scheme, port, or path; directory paths may be relative to the current working directory:
 
 ```ts
-const test = createFirefoxFixtures(base, {
-  extensionPath: './dist-extension',
+  extensionPaths: ['./dist-extension'],
   localMappings: {
     'app.localhost': './tests/fixtures/app',
     'assets.localhost': './tests/fixtures/assets'
@@ -105,7 +104,7 @@ Register native hosts in the fixture configuration. Each entry's key becomes the
 
 ```ts
 const test = createFirefoxFixtures(base, {
-  extensionPath: './dist-extension',
+  extensionPaths: ['./dist-extension'],
   nativeMessagingHosts: {
     'org.example.echo': {
       executable: './tests/native-host',
@@ -127,26 +126,43 @@ The session emits a `message` event for every decoded frame. `session.messages` 
 
 On Linux, the harness writes manifests under a unique temporary directory for each Firefox instance, then uses privileged RDP evaluation to set `XREUserNativeManifests` before initializing Firefox's native manifest cache. It does not write to `~/.mozilla/native-messaging-hosts`. The worker or test fixture teardown closes Firefox (which shuts down native hosts) before removing the temporary profile and manifests.
 
-## Extension handle
+## Extension collection and handles
 
-The `extension` fixture exposes:
+The `extensions` fixture exposes the configured add-ons as a read-only Map-like collection keyed by Gecko extension ID:
+
+```ts
+test('manage extension lifecycles', async ({ extensions }) => {
+  const webhid = extensions.get('webhid@example.org')!
+  const webkeyboard = extensions.get('webkeyboard@example.org')!
+
+  await webhid.reload()
+  await webkeyboard.disable()
+  const added = await extensions.install('./extensions/another.xpi')
+  await added.uninstall()
+})
+```
+
+Use `extensions.has(id)`, `extensions.get(id)`, `values()`, and the other read-only Map methods to inspect membership. `extensions.install(path)` installs an unpacked directory or packed XPI into the running Firefox instance and returns its handle.
+
+Each `FirefoxExtension` handle provides:
 
 - `id` and `installPath` — the installed extension identity and source path (directory or XPI).
-- `background` — evaluator for the extension background context.
+- `background` — evaluator for the extension background context, when present.
 - `isolated` — evaluator bound to the fixture's current `page`.
 - `isolatedContexts.get(page)` — evaluator factory for any explicit Playwright page.
-- `activateAction(page, kind)` — opens an action popup as a Playwright page. Pass `{ waitForPopup: false }` for a click-only action.
-- `waitForPopup()` — waits for an extension popup target.
-- `activateSidebar(page)` — opens the extension sidebar and returns its Playwright page.
-- `close()` — closes the extension harness.
+- `activateAction(page, kind)`, `waitForPopup()`, and `activateSidebar(page)` — open or wait for extension UI.
+- `reload()`, `enable()`, `disable()`, and `uninstall()` — control this extension's lifecycle.
 
-The configured extension is installed directly from its source directory or XPI. Closed-shadow locator support patches Playwright Firefox's Juggler to install a privileged getter in its utility sandbox; sidebar targets bind to Firefox's inner WebExtension panel browser rather than its outer sidebar host.
+Handles retain their identity across reload, disable, and enable. Lifecycle changes dispose of prior background and isolated evaluators and close that extension's popup and sidebar pages. Uninstalling an extension removes it from Firefox and from `extensions`; `close()` is also available as an alias for `uninstall()`.
+
+All configured extensions are installed from `extensionPaths` before the fixture is used. Closed-shadow locator support patches Playwright Firefox's Juggler to install a privileged getter in its utility sandbox; sidebar targets bind to Firefox's inner WebExtension panel browser rather than its outer sidebar host.
 
 ## Background evaluation
 
-Use `extension.background` for code running in the extension background context:
+Select a handle from `extensions` before using its background evaluator:
 
 ```ts
+const extension = extensions.get('example@example.org')!
 const runtimeId = await extension.background.evaluate(() => browser.runtime.id)
 expect(runtimeId).toBe(extension.id)
 ```

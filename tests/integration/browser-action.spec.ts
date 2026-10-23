@@ -1,15 +1,16 @@
 import { baseTest, createFirefoxFixtures, expect } from './fixtures.js'
 
 const test = createFirefoxFixtures(baseTest, {
-  extensionPath: new URL('../fixtures/browser-action-extension', import.meta.url).pathname,
+  extensionPaths: [new URL('../fixtures/browser-action-extension', import.meta.url).pathname],
   headless: true
 })
 
 test('browserAction popup is a Playwright Page with input, screenshot, and panel lifecycle', async ({
   page,
-  extension,
+  extensions,
   rdp
 }) => {
+  const extension = extensions.values().next().value!
   await page.goto('https://example.com/')
   await page.locator('body').evaluate((body) => (body.dataset.pageMarker = 'first'))
   const duplicateUrlPage = await page.context().newPage()
@@ -78,8 +79,9 @@ test('browserAction popup is a Playwright Page with input, screenshot, and panel
 
 test('browserAction popup reports Shift and Meta independently in headless input', async ({
   page,
-  extension
+  extensions
 }) => {
+  const extension = extensions.values().next().value!
   await page.goto('https://example.com/')
   const popup = await extension.activateAction(page, 'browserAction')
   const confirmButton = popup.getByRole('button', { name: 'Confirm' })

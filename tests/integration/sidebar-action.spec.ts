@@ -1,14 +1,15 @@
 import { baseTest, createFirefoxFixtures, expect } from './fixtures.js'
 
 const test = createFirefoxFixtures(baseTest, {
-  extensionPath: new URL('../fixtures/sidebar-action-extension', import.meta.url).pathname,
+  extensionPaths: [new URL('../fixtures/sidebar-action-extension', import.meta.url).pathname],
   headless: true
 })
 
 test('sidebar action is a Playwright Page with interaction and close lifecycle', async ({
   page,
-  extension
+  extensions
 }) => {
+  const extension = extensions.values().next().value!
   const sidebar = await extension.activateSidebar(page)
   expect(sidebar.url()).toMatch(/^moz-extension:\/\//)
   expect(await sidebar.opener()).toBe(page)
@@ -49,8 +50,9 @@ test('sidebar action is a Playwright Page with interaction and close lifecycle',
 
 test('waitForPopup returns the popup instead of an already-open sidebar', async ({
   page,
-  extension
+  extensions
 }) => {
+  const extension = extensions.values().next().value!
   const sidebar = await extension.activateSidebar(page)
   expect(page.context().pages()).toContain(sidebar)
   const message = sidebar.getByRole('textbox', { name: 'Message' })
@@ -79,9 +81,10 @@ test('waitForPopup returns the popup instead of an already-open sidebar', async 
 test('closes the sidebar from browser chrome and drives the bookmarks sidebar Page', async ({
   context,
   page,
-  extension,
+  extensions,
   chromePage
 }) => {
+  const extension = extensions.values().next().value!
   const sidebar = await extension.activateSidebar(page)
   const sidebarClosed = sidebar.waitForEvent('close')
   await chromePage.locator('#sidebar-button').click()

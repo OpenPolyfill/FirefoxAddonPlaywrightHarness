@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test'
 import type { FirefoxIsolatedContexts, FirefoxIsolatedPage, EvaluateOptions } from './types.js'
-import { FirefoxRdpSession } from './rdp.js'
+import { serializeIsolatedEvaluation, type FirefoxRdpSession } from './rdp.js'
 
 export class RdpIsolatedNamespace implements FirefoxIsolatedContexts {
   constructor(
@@ -8,20 +8,31 @@ export class RdpIsolatedNamespace implements FirefoxIsolatedContexts {
     private readonly addonId: string
   ) {}
 
-  private queue = Promise.resolve()
+  private generation = 0
+
+  invalidate(): void {
+    this.generation++
+  }
+  private assertGeneration(generation: number): void {
+    if (generation !== this.generation) throw new Error('Firefox isolated evaluator is stale')
+  }
 
   get(page: Page): FirefoxIsolatedPage {
-    return new RdpIsolatedPage(page, this)
+    return new RdpIsolatedPage(page, this, this.generation)
   }
 
   evaluate<R>(
     page: Page,
     pageFunction: string | ((...args: unknown[]) => R | Promise<R>),
-    args: unknown[]
+    args: unknown[],
+    generation: number
   ): Promise<R> {
-    const run = this.queue.then(async () => {
+    return serializeIsolatedEvaluation(this.session, async () => {
+      this.assertGeneration(generation)
       await page.bringToFront()
+      this.assertGeneration(generation)
       const tab = (await this.session.rdp.root.listTabs()).find((candidate) => candidate.selected)
+      this.assertGeneration(generation)
       const browsingContextID = tab?.info.browsingContextID
       if (typeof browsingContextID !== 'number')
         throw new Error('Selected Firefox tab did not expose a browsingContextID')
@@ -30,27 +41,26 @@ export class RdpIsolatedNamespace implements FirefoxIsolatedContexts {
         this.addonId,
         browsingContextID
       )
-      return evaluation.evaluate<R>(pageUrl, pageFunction, args)
+      this.assertGeneration(generation)
+      const result = await evaluation.evaluate<R>(pageUrl, pageFunction, args)
+      this.assertGeneration(generation)
+      return result
     })
-    this.queue = run.then(
-      () => undefined,
-      () => undefined
-    )
-    return run
   }
 }
 
 class RdpIsolatedPage implements FirefoxIsolatedPage {
   constructor(
     private readonly page: Page,
-    private readonly namespace: RdpIsolatedNamespace
+    private readonly namespace: RdpIsolatedNamespace,
+    private readonly generation: number
   ) {}
 
   evaluate<R = unknown>(
     pageFunction: string | ((...args: unknown[]) => R | Promise<R>),
     ...args: unknown[]
   ): Promise<R> {
-    return this.namespace.evaluate(this.page, pageFunction, args)
+    return this.namespace.evaluate(this.page, pageFunction, args, this.generation)
   }
 
   async waitForFunction<R = unknown>(

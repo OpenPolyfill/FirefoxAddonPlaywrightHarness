@@ -12,11 +12,11 @@ See [Generated API](/docs/api/reference) for TypeDoc pages generated from `src/i
 - `createFirefoxFixtures(test, config)` — extend Playwright with the harness fixtures.
 - `chromePage` — automate the primary Firefox browser chrome window as a Playwright `Page`.
 - `chromePages()` and `getFirefoxChromePages(context)` — discover the currently open browser chrome Pages.
-- `extension.background` — evaluate in the extension background context.
-- `extension.isolated` — evaluate in the current fixture page.
-- `extension.isolatedContexts.get(page)` — evaluate in an explicitly selected page.
-- `extension.activateAction(page, kind)` — invoke an action and open its popup. Use `{ waitForPopup: false }` for click-only actions.
-- `extension.activateSidebar(page)` — open the extension sidebar and return its Playwright `Page`.
+- `extensions` — read-only Map-like collection of installed handles keyed by Gecko extension ID.
+- `extensions.get(id)` / `extensions.has(id)` — select an installed extension or check membership.
+- `extensions.install(path)` — install a directory or XPI at runtime.
+- `FirefoxExtension.reload()`, `enable()`, `disable()`, and `uninstall()` — control one extension lifecycle.
+- A selected handle's `background`, `isolated`, `isolatedContexts.get(page)`, `activateAction(page, kind)`, and `activateSidebar(page)` — evaluate or activate extension contexts and UI.
 - `rdp.root.listTabs()` — access the raw `FirefoxRDP` client from a test.
 - `nativeMessaging` — inspect host sessions, raw stdio, decoded Native Messaging frames, and process exit events.
 

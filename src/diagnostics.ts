@@ -155,10 +155,14 @@ export class FirefoxErrorDiagnostics {
     this.disposeListeners()
   }
 
+  private readonly extensionIds = new Set<string>()
+
   constructor(
     private readonly session: FirefoxRdpSession,
-    private extensionId?: string
+    extensionIds?: string | Iterable<string>
   ) {
+    if (typeof extensionIds === 'string') this.extensionIds.add(extensionIds)
+    else for (const extensionId of extensionIds ?? []) this.extensionIds.add(extensionId)
     this.session.rdp.on('packet', this.onPacket)
     this.session.rdp.on('close', this.onConnectionClose)
   }
@@ -169,20 +173,12 @@ export class FirefoxErrorDiagnostics {
     await Promise.all([...existing].map((target) => this.observeTarget(target)))
   }
 
-  setExtensionId(extensionId: string): void {
-    this.extensionId = extensionId
-    for (let index = this.diagnostics.length - 1; index >= 0; index--) {
-      const entry = this.diagnostics[index]
-      if (
-        entry?.executionContext === 'extension background' &&
-        entry.extensionId !== undefined &&
-        entry.extensionId !== extensionId
-      )
-        this.diagnostics.splice(index, 1)
-    }
-    this.seenDiagnosticKeys.clear()
-    for (const entry of this.diagnostics)
-      this.seenDiagnosticKeys.set(this.diagnosticKey(entry), entry)
+  addExtensionId(extensionId: string): void {
+    this.extensionIds.add(extensionId)
+  }
+
+  removeExtensionId(extensionId: string): void {
+    this.extensionIds.delete(extensionId)
   }
 
   /** Preserve startup diagnostics for the first test; discard all prior-test events afterwards. */
@@ -346,7 +342,7 @@ export class FirefoxErrorDiagnostics {
     const addonId = stringField(payload, 'addonId') ?? stringField(target.form, 'addonId')
     const executionContext = this.executionContext(target, sourceURL, targetURL, addonId)
     if (!executionContext) return
-    if (addonId && this.extensionId && addonId !== this.extensionId) return
+    if (addonId && this.extensionIds.size && !this.extensionIds.has(addonId)) return
 
     const args = payload.arguments
     const error = record(payload.error) ?? record(payload.exception)

@@ -239,6 +239,8 @@ export class RdpInspectedWindowEvaluation {
 export interface InstalledExtension {
   id: string
   addonActor: string
+  manifest: Record<string, unknown>
+  backgroundTarget?: TargetFront
   background?: RdpEvaluation
   watcher: ActorFront
 }
@@ -247,6 +249,7 @@ export class FirefoxRdpSession {
   readonly targets: TargetFront[] = []
   chromeTarget: TargetFront | undefined
   private readonly targetWaiters = new Map<(target: TargetFront) => void, () => void>()
+  private readonly addonActors = new Map<string, string>()
   private closed = false
   private readonly onPacket = (packet: unknown) => this.handlePacket(packet)
   private readonly onClose = () => this.dispose()
@@ -325,32 +328,138 @@ export class FirefoxRdpSession {
       return id && actor ? [{ ...addon, id, actor }] : []
     })
   }
-
-  async installExtension(path: string): Promise<InstalledExtension> {
-    const installed = await this.installTemporaryAddon(path)
-    const addon = this.rdp.actor(installed.actor)
+  private async watchAddonActor(extensionId: string, addonActorId: string): Promise<ActorFront> {
+    const addon = this.rdp.actor(addonActorId)
     const watcherReply = await addon.call('getWatcher')
     const watcherForm = record(watcherReply)?.watcher ?? watcherReply
     const watcher = this.rdp.actor(actorId(watcherForm))
     this.attachWatcher(watcher)
     await watcher.call('watchTargets', { targetType: 'frame' })
     await watcher.call('watchTargets', { targetType: 'worker' })
+    this.addonActors.set(extensionId, addonActorId)
+    return watcher
+  }
+
+  async installExtension(
+    path: string,
+    onInstalled?: (extensionId: string) => void
+  ): Promise<InstalledExtension> {
     const manifest = await readExtensionManifest(path)
-    const backgroundTarget = hasBackground(manifest)
-      ? await this.waitForTarget(
-          (target) => isBackgroundTarget(target, manifest, installed.id),
-          15_000
-        )
-      : undefined
-    const targetConsole = backgroundTarget?.console()
-    if (targetConsole)
-      await targetConsole.call('startListeners', { listeners: ['evaluationResult'] })
-    return {
-      id: installed.id,
-      addonActor: installed.actor,
-      background: targetConsole ? new RdpEvaluation(this.rdp, targetConsole) : undefined,
-      watcher
+    const installed = await this.installTemporaryAddon(path)
+    try {
+      onInstalled?.(installed.id)
+      const watcher = await this.watchAddonActor(installed.id, installed.actor)
+      const background = await this.waitForExtensionBackground(installed.id, manifest)
+      return {
+        id: installed.id,
+        addonActor: installed.actor,
+        manifest,
+        backgroundTarget: background?.target,
+        background: background?.evaluator,
+        watcher
+      }
+    } catch (error) {
+      await this.uninstallAddon(installed.id).catch(() => undefined)
+      throw error
     }
+  }
+
+  private async evaluateChrome<R = unknown>(expression: string): Promise<R> {
+    const chrome = this.chromeTarget
+    if (!chrome) throw new Error('Firefox RDP did not expose the parent chrome target')
+    const evaluation = new RdpEvaluation(this.rdp, chrome.console())
+    try {
+      return await evaluation.evaluate<R>(expression)
+    } finally {
+      evaluation.dispose()
+    }
+  }
+
+  async setAddonEnabled(addonId: string, enabled: boolean, hasBackground = false): Promise<void> {
+    const method = enabled ? 'enable' : 'disable'
+    await this.evaluateChrome(`(async () => {
+      const { AddonManager } = ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs')
+      const { ExtensionParent } = ChromeUtils.importESModule('resource://gre/modules/ExtensionParent.sys.mjs')
+      const id = ${JSON.stringify(addonId)}
+      const previousBackground = ExtensionParent.GlobalManager.extensionMap.get(id)?.backgroundContext
+      const previousInnerWindowId = previousBackground?.innerWindowID
+      const previousBrowsingContextId = previousBackground?.browsingContext?.id
+      const addon = await AddonManager.getAddonByID(id)
+      if (!addon) throw new Error('Firefox add-on is not registered: ' + id)
+      await addon.${method}()
+      if (addon.isActive !== ${JSON.stringify(enabled)})
+        throw new Error('Firefox add-on state did not become ${enabled ? 'enabled' : 'disabled'}')
+      if (${JSON.stringify(enabled && hasBackground)}) {
+        const deadline = Date.now() + 15_000
+        while (Date.now() < deadline) {
+          const currentBackground = ExtensionParent.GlobalManager.extensionMap.get(id)?.backgroundContext
+          if (
+            currentBackground &&
+            (currentBackground !== previousBackground ||
+              currentBackground.innerWindowID !== previousInnerWindowId ||
+              currentBackground.browsingContext?.id !== previousBrowsingContextId)
+          ) return
+          await new Promise(resolve => setTimeout(resolve, 25))
+        }
+        throw new Error('Timed out waiting for the Firefox extension background context to enable')
+      }
+      if (${JSON.stringify(!enabled && hasBackground)} && previousBackground) {
+        const deadline = Date.now() + 15_000
+        while (Date.now() < deadline) {
+          const currentBackground = ExtensionParent.GlobalManager.extensionMap.get(id)?.backgroundContext
+          if (!currentBackground || currentBackground !== previousBackground || previousBackground.unloaded)
+            return
+          await new Promise(resolve => setTimeout(resolve, 25))
+        }
+        throw new Error('Timed out waiting for the Firefox extension background context to stop')
+      }
+    })()`)
+  }
+
+  async uninstallAddon(addonId: string): Promise<void> {
+    await this.rdp.actor(this.addonsActor).call('uninstallAddon', { addonId })
+    const deadline = Date.now() + 15_000
+    while ((await this.listAddons()).some((addon) => addon.id === addonId)) {
+      if (Date.now() >= deadline)
+        throw new Error(`Timed out waiting for Firefox to uninstall extension ${addonId}`)
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    this.addonActors.delete(addonId)
+  }
+
+  async refreshExtensionTargets(addonId: string): Promise<void> {
+    const installed = (await this.listAddons()).find((addon) => addon.id === addonId)
+    if (!installed) throw new Error(`Firefox extension ${addonId} is not installed`)
+    if (this.addonActors.get(addonId) === installed.actor) return
+    await this.watchAddonActor(addonId, installed.actor)
+  }
+  private async backgroundBrowsingContextId(addonId: string): Promise<number | undefined> {
+    const browsingContextId = await this.evaluateChrome<number | null>(`(() => {
+      const { ExtensionParent } = ChromeUtils.importESModule('resource://gre/modules/ExtensionParent.sys.mjs')
+      const extension = ExtensionParent.GlobalManager.extensionMap.get(${JSON.stringify(addonId)})
+      return extension?.backgroundContext?.browsingContext?.id ?? null
+    })()`)
+    return typeof browsingContextId === 'number' ? browsingContextId : undefined
+  }
+
+  async waitForExtensionBackground(
+    addonId: string,
+    manifest: Record<string, unknown>,
+    excludedConsoleActor?: string
+  ): Promise<{ target: TargetFront; evaluator: RdpEvaluation } | undefined> {
+    if (!hasBackground(manifest)) return undefined
+    const browsingContextId = await this.backgroundBrowsingContextId(addonId)
+    const target = await this.waitForTarget(
+      (candidate) =>
+        isBackgroundTarget(candidate, manifest, addonId) &&
+        stringField(candidate.form, 'consoleActor') !== excludedConsoleActor &&
+        (browsingContextId === undefined ||
+          candidate.form?.browsingContextID === browsingContextId),
+      15_000
+    )
+    const targetConsole = target.console()
+    await targetConsole.call('startListeners', { listeners: ['evaluationResult'] })
+    return { target, evaluator: new RdpEvaluation(this.rdp, targetConsole) }
   }
 
   async inspectedWindowEvaluation(
@@ -455,6 +564,23 @@ export class FirefoxRdpSession {
     watcher.registerEvents('target-available-form', 'target-destroyed-form')
   }
 }
+const isolatedEvaluationQueues = new WeakMap<FirefoxRdpSession, Promise<void>>()
+
+export function serializeIsolatedEvaluation<T>(
+  session: FirefoxRdpSession,
+  operation: () => Promise<T>
+): Promise<T> {
+  const queue = isolatedEvaluationQueues.get(session) ?? Promise.resolve()
+  const run = queue.then(operation)
+  isolatedEvaluationQueues.set(
+    session,
+    run.then(
+      () => undefined,
+      () => undefined
+    )
+  )
+  return run
+}
 
 function isBackgroundTarget(
   target: TargetFront,
@@ -465,8 +591,23 @@ function isBackgroundTarget(
   const consoleActor = stringField(target.form, 'consoleActor')
   if (!consoleActor || stringField(target.form, 'addonId') !== addonId) return false
   if (url.includes('_generated_background_page')) return true
-  const page = stringField(record(manifest.background), 'page')?.replace(/^\.\//, '')
-  return page ? new URL(url).pathname.endsWith(`/${page}`) : false
+  const background = record(manifest.background)
+  const files = [
+    stringField(background, 'page'),
+    stringField(background, 'service_worker'),
+    ...(Array.isArray(background?.scripts)
+      ? background.scripts.filter((file): file is string => typeof file === 'string')
+      : [])
+  ]
+    .filter((file): file is string => !!file)
+    .map((file) => file.replace(/^\.\//, ''))
+  if (!files.length) return false
+  try {
+    const pathname = new URL(url).pathname
+    return files.some((file) => pathname.endsWith(`/${file}`))
+  } catch {
+    return false
+  }
 }
 
 function hasBackground(manifest: Record<string, unknown>): boolean {

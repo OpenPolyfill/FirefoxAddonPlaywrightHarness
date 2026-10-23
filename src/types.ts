@@ -22,7 +22,8 @@ export interface NativeMessagingHostConfig {
 }
 
 export interface FirefoxHarnessConfig {
-  extensionPath: string
+  /** Initial extension directories or XPIs; use an empty array for runtime-only installs. */
+  extensionPaths: string[]
   headless?: boolean
   firefoxUserPrefs?: Record<string, boolean | number | string>
   args?: string[]
@@ -47,7 +48,7 @@ export interface FirefoxHarnessConfig {
 export interface FirefoxLaunchResult {
   context: BrowserContext
   rdp: FirefoxRDP
-  extension: FirefoxExtension
+  extensions: FirefoxExtensions
   nativeMessaging: NativeMessagingObserver
   userDataDir: string
   rdpPort: number
@@ -94,19 +95,34 @@ export interface FirefoxExtension {
   readonly background?: FirefoxBackground
   readonly isolated: FirefoxIsolated
   readonly isolatedContexts: FirefoxIsolatedContexts
-  installPath: string
+  readonly installPath: string
   activateAction(page: Page, kind?: ActionKind): Promise<Page>
   activateAction(page: Page, kind: ActionKind, options: { waitForPopup: false }): Promise<void>
   activateSidebar(page: Page): Promise<Page>
   waitForPopup(options?: { timeout?: number }): Promise<Page>
+  /** Reload the extension while preserving this handle's identity. */
+  reload(): Promise<void>
+  /** Enable this extension and refresh its background context, if any. */
+  enable(): Promise<void>
+  /** Disable this extension and invalidate its background and UI contexts. */
+  disable(): Promise<void>
+  /** Uninstall this extension and remove it from the collection. */
+  uninstall(): Promise<void>
+  /** Alias for uninstalling this extension. */
   close(): Promise<void>
+}
+
+/** Read-only Map-like view of installed extensions, keyed by Gecko extension ID. */
+export interface FirefoxExtensions extends ReadonlyMap<string, FirefoxExtension> {
+  /** Install a directory or XPI into the running Firefox instance. */
+  install(path: string): Promise<FirefoxExtension>
 }
 
 export interface InternalFirefoxContext extends BrowserContext {
   _firefoxHarnessDiagnostics?: FirefoxErrorDiagnostics
   _firefoxHarness?: {
     rdp: FirefoxRDP
-    extension: FirefoxExtension
+    extensions: FirefoxExtensions
     nativeMessaging: NativeMessagingObserver
     userDataDir: string
   }

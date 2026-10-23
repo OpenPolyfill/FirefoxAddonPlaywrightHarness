@@ -2,7 +2,7 @@ import { expect, baseTest, createFirefoxFixtures, withSharedPage } from './fixtu
 
 const test = withSharedPage(
   createFirefoxFixtures(baseTest, {
-    extensionPath: new URL('../fixtures/browser-action-extension', import.meta.url).pathname,
+    extensionPaths: [new URL('../fixtures/browser-action-extension', import.meta.url).pathname],
     headless: true,
     contextScope: 'worker'
   })

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { acquireRdpPort } from './port.js'
 import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
 import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
-import { FirefoxRdpSession, RdpEvaluation } from './rdp.js'
+import { FirefoxRdpSession, RdpEvaluation, type InstalledExtension } from './rdp.js'
 import { FirefoxErrorDiagnostics } from './diagnostics.js'
 import {
   configureNativeMessagingDirectory,
@@ -21,6 +21,7 @@ import { RdpIsolatedNamespace } from './isolated.js'
 
 import type {
   FirefoxExtension,
+  FirefoxExtensions,
   FirefoxHarnessConfig,
   FirefoxIsolatedPage,
   FirefoxLaunchResult,
@@ -59,14 +60,15 @@ function launchOptions(config: FirefoxHarnessConfig, port: number): LaunchOption
 export async function launchFirefoxExtension(
   config: FirefoxHarnessConfig
 ): Promise<FirefoxLaunchResult> {
-  if (!config.extensionPath) throw new Error('extensionPath is required')
-  const extensionPath = resolve(config.extensionPath)
+  if (!Array.isArray(config.extensionPaths))
+    throw new Error('extensionPaths must be an array of extension directories or XPI files')
+  const extensionPaths = config.extensionPaths.map((path) => resolve(path))
   const localMappings = await resolveLocalMappings(config.localMappings)
   const releasePort = await acquireRdpPort()
   const userDataDir = trackTempDir(await mkdtemp(join(tmpdir(), 'firefox-addon-test-')))
   let context: BrowserContext | undefined
   let session: FirefoxRdpSession | undefined
-  let extension: FirefoxExtension | undefined
+  let extensions: FirefoxExtensionCollection | undefined
   let diagnostics: FirefoxErrorDiagnostics | undefined
   let localMode: FirefoxLocalModeController | undefined
   let nativeMessaging: NativeMessagingObserver | undefined
@@ -111,22 +113,14 @@ export async function launchFirefoxExtension(
       }
       await nativeMessaging.start(session.rdp, chromeTarget)
     }
-    const installed = await session.installExtension(extensionPath)
-    diagnostics.setExtensionId(installed.id)
-    extension = new FirefoxExtensionHandle(
-      session,
-      context,
-      installed.id,
-      extensionPath,
-      installed.background,
-      diagnostics
-    )
+    extensions = new FirefoxExtensionCollection(session, context, diagnostics)
+    for (const extensionPath of extensionPaths) await extensions.install(extensionPath)
     localMode = await attachFirefoxLocalMappings(context, session.rdp, localMappings)
 
-    const result: FirefoxLaunchResult = {
+    return {
       context,
       rdp: session.rdp,
-      extension,
+      extensions,
       nativeMessaging,
       userDataDir,
       rdpPort: releasePort.port,
@@ -138,15 +132,20 @@ export async function launchFirefoxExtension(
             await nativeMessaging?.close()
           } finally {
             try {
-              await extension?.close()
+              await extensions?.dispose()
             } finally {
               try {
-                await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
+                await diagnostics?.close()
               } finally {
+                session?.close()
                 try {
-                  await removeTempDir(userDataDir)
+                  await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
                 } finally {
-                  await releasePort.release()
+                  try {
+                    await removeTempDir(userDataDir)
+                  } finally {
+                    await releasePort.release()
+                  }
                 }
               }
             }
@@ -154,42 +153,167 @@ export async function launchFirefoxExtension(
         }
       }
     }
-    return result
   } catch (error) {
-    await localMode?.close().catch(() => {})
+    await localMode?.close().catch(() => undefined)
     await nativeMessaging?.close().catch(() => undefined)
-    if (extension) {
-      await extension.close().catch(() => {})
-    } else {
-      await diagnostics?.close().catch(() => undefined)
-      session?.close()
-    }
+    await extensions?.dispose().catch(() => undefined)
+    await diagnostics?.close().catch(() => undefined)
+    session?.close()
     await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined).catch(() => undefined)
     await removeTempDir(userDataDir).finally(() => releasePort.release())
     throw error
   }
 }
 
-class FirefoxExtensionHandle implements FirefoxExtension {
-  readonly background?: RdpEvaluation
-  readonly isolatedContexts: RdpIsolatedNamespace
+class FirefoxExtensionCollection implements FirefoxExtensions {
+  private readonly handles = new Map<string, FirefoxExtensionHandle>()
+  private installQueue = Promise.resolve()
   private isolatedPage?: Page
-  private extensionBaseUrl?: string
-  private closed = false
 
   constructor(
     private readonly session: FirefoxRdpSession,
     private readonly browserContext: BrowserContext,
-    readonly id: string,
-    readonly installPath: string,
-    background: RdpEvaluation | undefined,
     private readonly diagnostics: FirefoxErrorDiagnostics
+  ) {}
+
+  get size(): number {
+    return this.handles.size
+  }
+
+  get(id: string): FirefoxExtension | undefined {
+    return this.handles.get(id)
+  }
+
+  has(id: string): boolean {
+    return this.handles.has(id)
+  }
+
+  entries(): MapIterator<[string, FirefoxExtension]> {
+    return this.handles.entries()
+  }
+
+  keys(): MapIterator<string> {
+    return this.handles.keys()
+  }
+
+  values(): MapIterator<FirefoxExtension> {
+    return this.handles.values()
+  }
+
+  forEach(
+    callbackfn: (
+      value: FirefoxExtension,
+      key: string,
+      map: ReadonlyMap<string, FirefoxExtension>
+    ) => void,
+    thisArg?: unknown
+  ): void {
+    for (const [id, extension] of this.handles) callbackfn.call(thisArg, extension, id, this)
+  }
+
+  [Symbol.iterator](): MapIterator<[string, FirefoxExtension]> {
+    return this.entries()
+  }
+
+  get [Symbol.toStringTag](): string {
+    return 'FirefoxExtensions'
+  }
+
+  install(path: string): Promise<FirefoxExtension> {
+    const run = this.installQueue.then(() => this.installOne(resolve(path)))
+    this.installQueue = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
+  bindIsolatedPage(page: Page): void {
+    this.isolatedPage = page
+    for (const extension of this.handles.values()) extension.bindIsolatedPage(page)
+  }
+
+  async dispose(): Promise<void> {
+    await this.installQueue
+    await Promise.all([...this.handles.values()].map((extension) => extension.disposeForHarness()))
+    this.handles.clear()
+    this.isolatedPage = undefined
+  }
+
+  private async installOne(path: string): Promise<FirefoxExtension> {
+    let registeredId: string | undefined
+    let installed: InstalledExtension
+    try {
+      installed = await this.session.installExtension(path, (extensionId) => {
+        registeredId = extensionId
+        this.diagnostics.addExtensionId(extensionId)
+      })
+    } catch (error) {
+      if (registeredId) this.diagnostics.removeExtensionId(registeredId)
+      throw error
+    }
+    if (this.handles.has(installed.id)) {
+      await this.session.uninstallAddon(installed.id).catch(() => undefined)
+      throw new Error(`Firefox extension ${installed.id} is already present in this collection`)
+    }
+    const handle = new FirefoxExtensionHandle(
+      this.session,
+      this.browserContext,
+      installed,
+      path,
+      () => {
+        if (this.handles.get(installed.id) !== handle) return
+        this.handles.delete(installed.id)
+        this.diagnostics.removeExtensionId(installed.id)
+      }
+    )
+    this.handles.set(installed.id, handle)
+    this.diagnostics.addExtensionId(installed.id)
+    if (this.isolatedPage) handle.bindIsolatedPage(this.isolatedPage)
+    return handle
+  }
+}
+
+class FirefoxExtensionHandle implements FirefoxExtension {
+  readonly id: string
+  readonly installPath: string
+  readonly isolatedContexts: RdpIsolatedNamespace
+  private readonly manifest: Record<string, unknown>
+  private readonly onUninstalled: () => void
+  private backgroundEvaluator?: RdpEvaluation
+  private backgroundConsoleActor?: string
+  private isolatedPage?: Page
+  private extensionBaseUrl?: string
+  private lifecycleQueue = Promise.resolve()
+  private readonly pendingPageWaiters = new Set<() => void>()
+  private readonly extensionPages = new Set<Page>()
+  private state: 'enabled' | 'disabled' | 'uninstalled' = 'enabled'
+  private disposed = false
+  private lifecycleChanging = false
+
+  constructor(
+    private readonly session: FirefoxRdpSession,
+    private readonly browserContext: BrowserContext,
+    installed: InstalledExtension,
+    installPath: string,
+    onUninstalled: () => void
   ) {
-    this.background = background
-    this.isolatedContexts = new RdpIsolatedNamespace(session, id)
+    this.id = installed.id
+    this.installPath = installPath
+    this.manifest = installed.manifest
+    this.backgroundEvaluator = installed.background
+    const backgroundConsoleActor = installed.backgroundTarget?.form?.consoleActor
+    this.backgroundConsoleActor =
+      typeof backgroundConsoleActor === 'string' ? backgroundConsoleActor : undefined
+    this.onUninstalled = onUninstalled
+    this.isolatedContexts = new RdpIsolatedNamespace(session, this.id)
+  }
+  get background(): RdpEvaluation | undefined {
+    return this.backgroundEvaluator
   }
 
   get isolated(): FirefoxIsolatedPage {
+    this.assertActive()
     if (!this.isolatedPage)
       throw new Error('Firefox extension isolated evaluation is not bound to a Playwright page')
     return this.isolatedContexts.get(this.isolatedPage)
@@ -199,7 +323,41 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     this.isolatedPage = page
   }
 
+  private assertInstalled(): void {
+    if (this.disposed) throw new Error('Firefox extension harness is closed')
+    if (this.state === 'uninstalled') throw new Error('Firefox extension is uninstalled')
+  }
+
+  private assertActive(): void {
+    this.assertInstalled()
+    if (this.lifecycleChanging) throw new Error('Firefox extension lifecycle is changing')
+    if (this.state !== 'enabled') throw new Error('Firefox extension is disabled')
+  }
+
+  private enqueueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.lifecycleQueue.then(async () => {
+      this.lifecycleChanging = true
+      try {
+        return await operation()
+      } finally {
+        this.lifecycleChanging = false
+      }
+    })
+    this.lifecycleQueue = run.then(
+      () => undefined,
+      () => undefined
+    )
+    return run
+  }
+
+  private trackExtensionPage(page: Page): Page {
+    this.extensionPages.add(page)
+    page.once('close', () => this.extensionPages.delete(page))
+    return page
+  }
+
   private async getExtensionBaseUrl(): Promise<string> {
+    this.assertInstalled()
     if (this.extensionBaseUrl) return this.extensionBaseUrl
     const chrome = this.session.chromeTarget
     if (!chrome)
@@ -223,6 +381,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
   private async waitForExtensionPage(
     kind: 'extension-popup' | 'extension-sidebar',
     timeout: number,
+    extensionBaseUrl: string,
     opener?: Page,
     targetId?: string,
     includeExisting = false
@@ -246,6 +405,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     const checkingPages = new Set<Page>()
     let settled = false
     let timeoutId: ReturnType<typeof setTimeout> | undefined
+    let cancelWait = () => {}
     const cleanup = () => {
       clearTimeout(timeoutId)
       clearInterval(pollId)
@@ -253,12 +413,20 @@ class FirefoxExtensionHandle implements FirefoxExtension {
       this.browserContext.off('close', onContextClose)
       for (const [page, listener] of pendingPages) page.off('framenavigated', listener)
       pendingPages.clear()
+      this.pendingPageWaiters.delete(cancelWait)
     }
+    cancelWait = () => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(new Error('Firefox extension lifecycle changed while waiting for its page'))
+    }
+    this.pendingPageWaiters.add(cancelWait)
     const finish = (page: Page) => {
       if (settled) return
       settled = true
       cleanup()
-      resolve(page)
+      resolve(this.trackExtensionPage(page))
     }
     const onContextClose = () => {
       if (settled) return
@@ -281,6 +449,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
             return value && typeof value === 'object' ? value : null
           })
           .catch(() => null)
+        if (!page.url().startsWith(extensionBaseUrl)) return
         if (identity?.kind !== kind || (targetId && identity.targetId !== targetId)) return
         if (opener) {
           try {
@@ -324,6 +493,120 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     return promise
   }
 
+  private async prepareLifecycleChange(): Promise<void> {
+    let baseUrl = this.extensionBaseUrl
+    if (!baseUrl && this.state === 'enabled')
+      baseUrl = await this.getExtensionBaseUrl().catch(() => undefined)
+    this.isolatedContexts.invalidate()
+    this.backgroundEvaluator?.dispose()
+    this.backgroundEvaluator = undefined
+    for (const cancelWait of [...this.pendingPageWaiters]) cancelWait()
+    const pages = new Set(this.extensionPages)
+    if (baseUrl) {
+      for (const page of this.browserContext.pages()) {
+        if (page.url().startsWith(baseUrl)) pages.add(page)
+      }
+    }
+    await Promise.all(
+      [...pages].map((page) => (page.isClosed() ? Promise.resolve() : page.close().catch(() => {})))
+    )
+    this.extensionPages.clear()
+  }
+
+  private async refreshBackground(excludePrevious = true): Promise<void> {
+    const background = await this.session.waitForExtensionBackground(
+      this.id,
+      this.manifest,
+      excludePrevious ? this.backgroundConsoleActor : undefined
+    )
+    this.backgroundEvaluator = background?.evaluator
+    const consoleActor = background?.target.form?.consoleActor
+    this.backgroundConsoleActor = typeof consoleActor === 'string' ? consoleActor : undefined
+  }
+
+  reload(): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      this.assertInstalled()
+      const wasEnabled = this.state === 'enabled'
+      const hasBackground = this.backgroundConsoleActor !== undefined
+      await this.prepareLifecycleChange()
+      if (wasEnabled) {
+        await this.session.setAddonEnabled(this.id, false, hasBackground)
+        this.state = 'disabled'
+      }
+      await this.session.setAddonEnabled(this.id, true, hasBackground)
+      this.state = 'enabled'
+      await this.session.refreshExtensionTargets(this.id)
+      if (wasEnabled) {
+        await this.refreshBackground()
+      } else {
+        await this.session.setAddonEnabled(this.id, false, hasBackground)
+        this.state = 'disabled'
+      }
+    })
+  }
+
+  enable(): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      this.assertInstalled()
+      if (this.state === 'enabled') return
+      await this.prepareLifecycleChange()
+      await this.session.setAddonEnabled(this.id, true, this.backgroundConsoleActor !== undefined)
+      this.state = 'enabled'
+      await this.session.refreshExtensionTargets(this.id)
+      await this.refreshBackground()
+    })
+  }
+
+  disable(): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      this.assertInstalled()
+      if (this.state === 'disabled') return
+      const hasBackground = this.backgroundConsoleActor !== undefined
+      await this.prepareLifecycleChange()
+      try {
+        await this.session.setAddonEnabled(this.id, false, hasBackground)
+        this.state = 'disabled'
+      } catch (error) {
+        await this.refreshBackground(false).catch(() => undefined)
+        throw error
+      }
+    })
+  }
+
+  uninstall(): Promise<void> {
+    return this.enqueueLifecycle(async () => {
+      if (this.state === 'uninstalled') return
+      this.assertInstalled()
+      await this.prepareLifecycleChange()
+      try {
+        await this.session.uninstallAddon(this.id)
+        this.state = 'uninstalled'
+        this.onUninstalled()
+      } catch (error) {
+        if (this.state !== 'uninstalled') await this.refreshBackground(false).catch(() => undefined)
+        throw error
+      }
+    })
+  }
+
+  async close(): Promise<void> {
+    await this.uninstall()
+  }
+
+  async disposeForHarness(): Promise<void> {
+    await this.lifecycleQueue
+    if (this.disposed) return
+    this.disposed = true
+    this.isolatedContexts.invalidate()
+    this.backgroundEvaluator?.dispose()
+    this.backgroundEvaluator = undefined
+    for (const cancelWait of [...this.pendingPageWaiters]) cancelWait()
+  }
+
+  private assertActionAvailable(): void {
+    this.assertActive()
+  }
   activateAction(page: Page, kind?: ActionKind): Promise<Page>
   activateAction(page: Page, kind: ActionKind, options: { waitForPopup: false }): Promise<void>
   async activateAction(
@@ -331,11 +614,12 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     kind: ActionKind = 'browserAction',
     options: { waitForPopup?: boolean } = {}
   ): Promise<Page | void> {
-    if (this.closed) throw new Error('Extension harness is closed')
+    this.assertActionAvailable()
+    const extensionBaseUrl = await this.getExtensionBaseUrl()
     const popup =
       options.waitForPopup === false
         ? undefined
-        : this.waitForExtensionPage('extension-popup', 15_000)
+        : this.waitForExtensionPage('extension-popup', 15_000, extensionBaseUrl)
     popup?.catch(() => undefined)
     await page.bringToFront()
     const chrome = this.session.chromeTarget
@@ -374,7 +658,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
   }
 
   async activateSidebar(page: Page): Promise<Page> {
-    if (this.closed) throw new Error('Extension harness is closed')
+    this.assertActionAvailable()
     const baseUrl = await this.getExtensionBaseUrl()
     await page.bringToFront()
     const chrome = this.session.chromeTarget
@@ -424,6 +708,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     const sidebarPage = await this.waitForExtensionPage(
       'extension-sidebar',
       15_000,
+      baseUrl,
       page,
       sidebarTargetId,
       true
@@ -433,23 +718,14 @@ class FirefoxExtensionHandle implements FirefoxExtension {
   }
 
   async waitForPopup(options: { timeout?: number } = {}): Promise<Page> {
-    if (this.closed) throw new Error('Extension harness is closed')
-    return this.waitForExtensionPage('extension-popup', options.timeout ?? 15_000)
-  }
-
-  async close(): Promise<void> {
-    this.closed = true
-    try {
-      await this.diagnostics.close()
-    } finally {
-      this.background?.dispose()
-      this.session.close()
-    }
+    this.assertActionAvailable()
+    const extensionBaseUrl = await this.getExtensionBaseUrl()
+    return this.waitForExtensionPage('extension-popup', options.timeout ?? 15_000, extensionBaseUrl)
   }
 }
 
-export function bindFirefoxExtensionPage(extension: FirefoxExtension, page: Page): void {
-  if (!(extension instanceof FirefoxExtensionHandle))
-    throw new Error('Firefox extension is not a harness extension handle')
-  extension.bindIsolatedPage(page)
+export function bindFirefoxExtensionsPage(extensions: FirefoxExtensions, page: Page): void {
+  if (!(extensions instanceof FirefoxExtensionCollection))
+    throw new Error('Firefox extension collection is not a harness collection')
+  extensions.bindIsolatedPage(page)
 }
