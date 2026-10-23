@@ -20,21 +20,26 @@ type NativeHostReply = {
   extensionId: string
 }
 
-function nativeMessagingHosts(description: string) {
+function nativeMessagingHosts(description: string, executable = nativeHostExecutable) {
   return {
     [nativeHostName]: {
-      executable: nativeHostExecutable,
+      executable,
       description,
       allowedExtensions: [nativeExtensionId]
     }
   }
 }
 
+const observeNativeMessagingHost = {
+  [nativeHostName]: { mode: 'non-blocking' as const }
+}
+
 const workerTest = createFirefoxFixtures(baseTest, {
   extensionPath,
   headless: true,
   contextScope: 'worker',
-  nativeMessagingHosts: nativeMessagingHosts('Worker-scoped native host')
+  nativeMessagingHosts: nativeMessagingHosts('Worker-scoped native host'),
+  nativeMessagingObservers: observeNativeMessagingHost
 })
 workerTest.describe.configure({ mode: 'parallel' })
 
@@ -95,11 +100,7 @@ workerTest(
       type: 'stdio',
       allowed_extensions: [nativeExtensionId]
     })
-    expect(manifest.path).not.toBe(nativeHostExecutable)
-    expect(String(manifest.path)).toContain('native-host-proxies')
-    expect(await readFile(String(manifest.path), 'utf8')).toContain(
-      JSON.stringify(nativeHostExecutable)
-    )
+    expect(manifest.path).toBe(nativeHostExecutable)
 
     const request = { text: 'one-shot' }
     const sessionCount = nativeMessaging.sessions.length
@@ -107,6 +108,9 @@ workerTest(
       after: sessionCount,
       timeout: 5_000
     })
+    const observedDirections: string[] = []
+    const onObservedData = (event: { channel: string }) => observedDirections.push(event.channel)
+    nativeMessaging.on('data', onObservedData)
     let pid: number | undefined
     try {
       const [response, session] = await Promise.all([
@@ -122,14 +126,14 @@ workerTest(
       })
       expect(session.hostName).toBe(nativeHostName)
       expect(session.pid).toBe(response.pid)
-      expect(session.launcherPid).not.toBe(response.pid)
       expect(session.startedAt).toBeDefined()
-      expect(
-        (await session.waitForMessage({ direction: 'stdin', timeout: 5_000 })).message
-      ).toEqual(request)
       expect(
         (await session.waitForMessage({ direction: 'stdout', timeout: 5_000 })).message
       ).toEqual(response)
+      expect(observedDirections).toContain('stdin')
+      expect(
+        (await session.waitForMessage({ direction: 'stdin', timeout: 5_000 })).message
+      ).toEqual(request)
       expect(await session.waitForExit({ timeout: 5_000 })).toEqual({ code: 0, signal: null })
       expect(session.state).toBe('exited')
       expect(session.exitCode).toBe(0)
@@ -142,6 +146,7 @@ workerTest(
       expect(rawOutput).toEqual(nativeFrame(response))
       await waitForHostExit(response.pid)
     } finally {
+      nativeMessaging.off('data', onObservedData)
       if (pid !== undefined) await rm(stoppedMarker(pid), { force: true })
     }
   }
@@ -184,6 +189,20 @@ workerTest(
     expect(replies[1].pid).toBe(replies[0].pid)
     expect(replies[1].manifestPath).toBe(replies[0].manifestPath)
     expect(session.pid).toBe(replies[0].pid)
+    expect(await session.waitForExit({ timeout: 5_000 })).toEqual({ code: 0, signal: null })
+    expect(await readRawBytes(session.stdin)).toEqual(
+      Buffer.concat([nativeFrame({ text: 'first' }), nativeFrame({ text: 'second' })])
+    )
+    expect(
+      session.messages
+        .filter(({ direction }) => direction === 'stdin')
+        .map(({ message }) => message)
+    ).toEqual([{ text: 'first' }, { text: 'second' }])
+    expect(
+      session.messages
+        .filter(({ direction }) => direction === 'stdout')
+        .map(({ message }) => message)
+    ).toEqual(replies)
     const observedInputs = [
       (await session.waitForMessage({ direction: 'stdin', timeout: 5_000 })).message,
       (await session.waitForMessage({ direction: 'stdin', timeout: 5_000 })).message
@@ -244,11 +263,104 @@ workerTest(
   }
 )
 
+baseTest('registered native hosts are not observed without per-name opt-in', async () => {
+  const running = await launchFirefoxExtension({
+    extensionPath,
+    headless: true,
+    nativeMessagingHosts: nativeMessagingHosts('Unobserved native host')
+  })
+  let pid: number | undefined
+  try {
+    const response = await sendNativeMessage(running.extension, { text: 'not-observed' })
+    pid = response.pid
+    expect(response.message).toEqual({ text: 'not-observed' })
+    expect(running.nativeMessaging.sessions).toHaveLength(0)
+    await waitForHostExit(response.pid)
+  } finally {
+    await running.close()
+    if (pid !== undefined) await rm(stoppedMarker(pid), { force: true })
+  }
+})
+
+baseTest('blocking Native Messaging observers can mutate both stream directions', async () => {
+  const running = await launchFirefoxExtension({
+    extensionPath,
+    headless: true,
+    nativeMessagingHosts: nativeMessagingHosts('Blocking native host'),
+    nativeMessagingObservers: {
+      [nativeHostName]: {
+        mode: 'blocking',
+        onData: ({ channel, bytes }) => {
+          if (channel !== 'stdin' && channel !== 'stdout') return
+          const payloadLength = bytes.readUInt32LE(0)
+          const payload = JSON.parse(
+            bytes.subarray(4, payloadLength + 4).toString('utf8')
+          ) as Record<string, unknown>
+          if (channel === 'stdin') {
+            payload.text = 'mutated-inbound'
+          } else if (payload.message && typeof payload.message === 'object') {
+            payload.message = {
+              ...(payload.message as Record<string, unknown>),
+              text: 'mutated-outbound'
+            }
+          }
+          return nativeFrame(payload)
+        }
+      }
+    }
+  })
+  const request = { text: 'original' }
+  const sessionPromise = running.nativeMessaging.waitForSession(nativeHostName, { timeout: 5_000 })
+  let pid: number | undefined
+  try {
+    const [response, session] = await Promise.all([
+      sendNativeMessage(running.extension, request),
+      sessionPromise
+    ])
+    pid = response.pid
+    expect(response.message).toEqual({ text: 'mutated-outbound' })
+    expect((await session.waitForMessage({ direction: 'stdin', timeout: 5_000 })).message).toEqual(
+      request
+    )
+    const observedOutput = await session.waitForMessage({ direction: 'stdout', timeout: 5_000 })
+    expect(observedOutput.message).toMatchObject({ message: { text: 'mutated-inbound' } })
+    expect(await session.waitForExit({ timeout: 5_000 })).toEqual({ code: 0, signal: null })
+    await waitForHostExit(response.pid)
+  } finally {
+    await running.close()
+    if (pid !== undefined) await rm(stoppedMarker(pid), { force: true })
+  }
+})
+
+baseTest('writes valid native manifests without probing executable paths', async () => {
+  const missingExecutable = join(tmpdir(), `openpolyfill-missing-native-host-${process.pid}`)
+  await rm(missingExecutable, { force: true })
+  const running = await launchFirefoxExtension({
+    extensionPath,
+    headless: true,
+    nativeMessagingHosts: nativeMessagingHosts('Missing native binary', missingExecutable)
+  })
+  try {
+    const manifestDirectory = join(
+      running.userDataDir,
+      'native-messaging',
+      process.platform === 'darwin' ? 'NativeMessagingHosts' : 'native-messaging-hosts'
+    )
+    const manifestPath = join(manifestDirectory, `${nativeHostName}.json`)
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+    expect(manifest.path).toBe(missingExecutable)
+    await expect(access(missingExecutable)).rejects.toThrow()
+  } finally {
+    await running.close()
+  }
+})
+
 baseTest('fixture teardown stops an open native host and removes private manifests', async () => {
   const running = await launchFirefoxExtension({
     extensionPath,
     headless: true,
-    nativeMessagingHosts: nativeMessagingHosts('Teardown native host')
+    nativeMessagingHosts: nativeMessagingHosts('Teardown native host'),
+    nativeMessagingObservers: observeNativeMessagingHost
   })
   let pid: number | undefined
   let closed = false
@@ -291,12 +403,14 @@ baseTest('isolates same-name hosts across concurrent Firefox worker contexts', a
     launchFirefoxExtension({
       extensionPath,
       headless: true,
-      nativeMessagingHosts: nativeMessagingHosts('First worker host')
+      nativeMessagingHosts: nativeMessagingHosts('First worker host'),
+      nativeMessagingObservers: observeNativeMessagingHost
     }),
     launchFirefoxExtension({
       extensionPath,
       headless: true,
-      nativeMessagingHosts: nativeMessagingHosts('Second worker host')
+      nativeMessagingHosts: nativeMessagingHosts('Second worker host'),
+      nativeMessagingObservers: observeNativeMessagingHost
     })
   ])
   const [firstResult, secondResult] = launches

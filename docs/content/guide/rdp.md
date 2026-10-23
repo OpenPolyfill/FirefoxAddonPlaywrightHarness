@@ -61,7 +61,7 @@ await watcher.unwatchResources(['network-event'])
 
 When `nativeMessagingHosts` is configured, the harness creates a private per-profile manifest directory and uses the chrome target's privileged RDP evaluator to redirect `XREUserNativeManifests` through `Services.dirsvc` before it calls `NativeManifests.init()`. Firefox then caches the isolated lookup path for that instance. Linux uses the `native-messaging-hosts` subdirectory; fixture teardown closes Firefox and its native host processes before removing the temporary profile.
 
-The generated host launcher forwards the configured executable's original stdin, stdout and stderr while copying each byte stream into the harness's per-context Native Messaging observer. The executable itself is not modified.
+Firefox's `NativeMessaging.sys.mjs` is hooked inside Firefox through privileged RDP evaluation. Only host names in `nativeMessagingObservers` are observed. The native manifest keeps the configured executable path; the harness does not check whether the binary exists or is executable.
 
 ## Security
 

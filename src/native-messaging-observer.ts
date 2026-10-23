@@ -1,17 +1,17 @@
 import { EventEmitter } from 'node:events'
-import { chmod, unlink } from 'node:fs/promises'
-import { join } from 'node:path'
-import { createServer, type Server, type Socket } from 'node:net'
 import { Readable } from 'node:stream'
+import type { FirefoxRDP, TargetFront } from '@openpolyfill/firefox-rdp'
+import { RdpEvaluation } from './rdp.js'
 
 export type NativeMessagingDirection = 'stdin' | 'stdout'
 export type NativeMessagingChannel = NativeMessagingDirection | 'stderr'
+export type NativeMessagingObserverMode = 'non-blocking' | 'blocking'
 export type NativeMessagingProcessState = 'starting' | 'running' | 'exited'
 
 export interface NativeMessagingMessage {
   direction: NativeMessagingDirection
   message: unknown
-  /** The complete 4-byte-length-prefixed frame copied from the corresponding raw stream. */
+  /** The complete length-prefixed frame observed inside Firefox before optional mutation. */
   raw: Buffer
 }
 
@@ -27,9 +27,29 @@ export interface NativeMessagingWaitOptions {
 export interface NativeMessagingMessageWaitOptions extends NativeMessagingWaitOptions {
   direction?: NativeMessagingDirection
 }
+
 export interface NativeMessagingSessionWaitOptions extends NativeMessagingWaitOptions {
   /** Skip this many sessions already present when waiting for a later process. */
   after?: number
+}
+
+export interface NativeMessagingStreamEvent {
+  hostName: string
+  pid: number
+  channel: NativeMessagingChannel
+  /** Raw bytes observed by Firefox before any blocking-mode mutation. */
+  bytes: Buffer
+  session: NativeMessagingSession
+}
+
+export type NativeMessagingMutation = Uint8Array | void
+
+export interface NativeMessagingObserverConfig {
+  mode: NativeMessagingObserverMode
+  /** Return replacement framed bytes (or stderr bytes) in blocking mode. */
+  onData?: (
+    event: NativeMessagingStreamEvent
+  ) => NativeMessagingMutation | Promise<NativeMessagingMutation>
 }
 
 interface MessageWaiter {
@@ -46,29 +66,37 @@ interface SessionWaiter {
   timer?: ReturnType<typeof setTimeout>
 }
 
-interface ProxyStartEvent {
+interface BrowserStartEvent {
   type: 'start'
+  sessionId: number
   hostName: string
-  pid: number | null
-  launcherPid: number
+  pid: number
 }
 
-interface ProxyDataEvent {
+interface BrowserDataEvent {
   type: 'data'
+  eventId: number
+  sessionId: number
+  hostName: string
+  pid: number
   channel: NativeMessagingChannel
   bytes: string
 }
 
-interface ProxyExitEvent {
+interface BrowserExitEvent {
   type: 'exit'
+  sessionId: number
+  hostName: string
+  pid: number
   code: number | null
-  signal: NodeJS.Signals | null
 }
 
-type ProxyEvent =
-  ProxyStartEvent | ProxyDataEvent | ProxyExitEvent | { type: 'error'; message: string }
-const MAX_RETAINED_MESSAGES = 256
-const MAX_RETAINED_MESSAGE_BYTES = 4 * 1024 * 1024
+type BrowserObserverEvent = BrowserStartEvent | BrowserDataEvent | BrowserExitEvent
+
+const maxRetainedMessages = 256
+const maxRetainedMessageBytes = 4 * 1024 * 1024
+const nativeMessagingModule = 'resource://gre/modules/NativeMessaging.sys.mjs'
+const browserObserverProperty = '__openpolyfillHarnessNativeMessagingObserver'
 
 function makeReadable(): Readable {
   return new Readable({ read() {} })
@@ -78,7 +106,224 @@ function timeoutError(description: string, timeout: number): Error {
   return new Error(`Timed out after ${timeout}ms waiting for ${description}`)
 }
 
-/** One Firefox native-host process and copies of the bytes it exchanged with Firefox. */
+function buildObserverBootstrap(modes: Record<string, NativeMessagingObserverMode>): string {
+  return `(() => {
+    const { NativeApp } = ChromeUtils.importESModule(${JSON.stringify(nativeMessagingModule)})
+    let observer = NativeApp[${JSON.stringify(browserObserverProperty)}]
+    if (!observer) {
+      observer = {
+        modes: new Map(),
+        sessions: new Map(),
+        pending: new Map(),
+        events: [],
+        nextSessionId: 1,
+        nextEventId: 1,
+        asBytes(value) {
+          if (ArrayBuffer.isView(value))
+            return new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+          if (Object.prototype.toString.call(value) === '[object ArrayBuffer]')
+            return new Uint8Array(value)
+          return new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+        },
+        makeFrame(payload) {
+          const bytes = this.asBytes(payload)
+          const frame = new Uint8Array(bytes.byteLength + 4)
+          new DataView(frame.buffer).setUint32(0, bytes.byteLength, true)
+          frame.set(bytes, 4)
+          return frame
+        },
+        framePayload(frame, maxLength) {
+          const bytes = this.asBytes(frame)
+          if (bytes.byteLength < 4) throw new Error('Native Messaging frame is shorter than its header')
+          const length = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true)
+          if (length > maxLength || length + 4 !== bytes.byteLength)
+            throw new Error('Invalid mutated Native Messaging frame length')
+          return bytes.slice(4)
+        },
+        encode(bytes) {
+          const data = this.asBytes(bytes)
+          let binary = ''
+          for (let offset = 0; offset < data.length; offset += 0x8000)
+            binary += String.fromCharCode(...data.subarray(offset, offset + 0x8000))
+          return btoa(binary)
+        },
+        decode(encoded) {
+          const binary = atob(encoded)
+          const bytes = new Uint8Array(binary.length)
+          for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index)
+          return bytes
+        },
+        configure(config) {
+          this.close()
+          this.events.length = 0
+          this.modes = new Map(Object.entries(config))
+        },
+        start(app) {
+          const hostName = app.name
+          const pid = app.proc.pid
+          const mode = this.modes.get(hostName)
+          if (!mode) return null
+          const sessionId = this.nextSessionId++
+          this.sessions.set(sessionId, { hostName, pid, mode, app, observed: 0 })
+          this.events.push({ type: 'start', sessionId, hostName, pid })
+          return sessionId
+        },
+        inspect(sessionId, channel, value) {
+          const session = this.sessions.get(sessionId)
+          const bytes = this.asBytes(value).slice()
+          if (!session) return Promise.resolve(bytes)
+          session.observed++
+          const eventId = this.nextEventId++
+          this.events.push({
+            type: 'data',
+            eventId,
+            sessionId,
+            hostName: session.hostName,
+            pid: session.pid,
+            channel,
+            bytes: this.encode(bytes)
+          })
+          if (session.mode !== 'blocking') return Promise.resolve(bytes)
+          return new Promise(resolve => this.pending.set(eventId, { sessionId, resolve, original: bytes }))
+        },
+        takeEvents() {
+          return this.events.splice(0)
+        },
+        respond(eventId, encoded) {
+          const pending = this.pending.get(eventId)
+          if (!pending) return false
+          this.pending.delete(eventId)
+          try {
+            pending.resolve(this.decode(encoded))
+          } catch (_) {
+            pending.resolve(pending.original)
+          }
+          return true
+        },
+        finish(sessionId, code) {
+          const session = this.sessions.get(sessionId)
+          if (!session) return
+          this.events.push({
+            type: 'exit',
+            sessionId,
+            hostName: session.hostName,
+            pid: session.pid,
+            code
+          })
+          this.sessions.delete(sessionId)
+          for (const [eventId, pending] of this.pending) {
+            if (pending.sessionId === sessionId) {
+              this.pending.delete(eventId)
+              pending.resolve(pending.original)
+            }
+          }
+        },
+        close() {
+          for (const pending of this.pending.values()) pending.resolve(pending.original)
+          this.pending.clear()
+          this.modes.clear()
+          for (const session of this.sessions.values()) session.mode = 'non-blocking'
+        },
+        unblock() {
+          for (const pending of this.pending.values()) pending.resolve(pending.original)
+          this.pending.clear()
+          for (const session of this.sessions.values()) session.mode = 'non-blocking'
+        },
+        async stopHosts() {
+          const sessions = [...this.sessions.values()]
+          const processes = sessions.map(session => session.app.proc).filter(Boolean)
+          for (const session of sessions) session.app.close()
+          let timeout
+          await Promise.race([
+            Promise.all(processes.map(proc => proc.wait().catch(() => undefined))),
+            new Promise(resolve => {
+              timeout = setTimeout(resolve, 13000)
+            })
+          ])
+          clearTimeout(timeout)
+        },
+        attach(app) {
+          if (Object.prototype.hasOwnProperty.call(app, '__openpolyfillHarnessNativeSession')) return
+          const mode = this.modes.get(app.name)
+          if (!mode || !app.proc) {
+            app.__openpolyfillHarnessNativeSession = null
+            return
+          }
+          const sessionId = this.start(app)
+          if (sessionId === null) return
+          app.__openpolyfillHarnessNativeSession = sessionId
+          const observer = this
+          app._startWrite = function() {
+            if (!this.sendQueue.length) return
+            if (this.writePromise)
+              throw new Error('Entered _startWrite() while writePromise is non-null')
+            const buffer = this.sendQueue.shift()
+            const frame = observer.makeFrame(observer.asBytes(buffer))
+            this.writePromise = observer
+              .inspect(sessionId, 'stdin', frame)
+              .then(forwarded => {
+                const complete = observer.asBytes(forwarded)
+                const payload = observer.framePayload(complete, 0xffffffff)
+                return proc.stdin
+                  .write(complete.slice(0, 4).buffer)
+                  .then(() => proc.stdin.write(payload.slice().buffer))
+              })
+              .then(() => {
+                this.writePromise = null
+                this._startWrite()
+              })
+              .catch(error => {
+                Cu.reportError(error.message)
+                this._cleanup(error)
+              })
+          }
+          const proc = app.proc
+          proc.wait().then(
+            ({ exitCode }) => observer.finish(sessionId, exitCode),
+            () => observer.finish(sessionId, null)
+          )
+          const stdout = proc.stdout
+          const readStdout = stdout.read.bind(stdout)
+          stdout.readJSON = function(length) {
+            return readStdout(length).then(async buffer => {
+              const frame = observer.makeFrame(new Uint8Array(buffer))
+              const forwarded = await observer.inspect(sessionId, 'stdout', frame)
+              const payload = observer.framePayload(forwarded, 1024 * 1024)
+              return JSON.parse(new TextDecoder().decode(payload))
+            })
+          }
+          if (proc.stderr) {
+            const stderr = proc.stderr
+            const readStderr = stderr.read.bind(stderr)
+            const decoder = stderr.decoder || new TextDecoder()
+            stderr.readString = function(length = null, options = { stream: length === null }) {
+              return readStderr(length).then(async buffer => {
+                let bytes = observer.asBytes(buffer)
+                if (bytes.byteLength)
+                  bytes = await observer.inspect(sessionId, 'stderr', bytes)
+                return decoder.decode(bytes, options)
+              })
+            }
+          }
+        }
+      }
+      NativeApp[${JSON.stringify(browserObserverProperty)}] = observer
+      const originalStartRead = NativeApp.prototype._startRead
+      NativeApp.prototype._startRead = function() {
+        observer.attach(this)
+        return originalStartRead.call(this)
+      }
+    }
+    observer.configure(${JSON.stringify(modes)})
+    return true
+  })()`
+}
+
+function createObserverEvaluation(expression: string): string {
+  return `ChromeUtils.importESModule(${JSON.stringify(nativeMessagingModule)}).NativeApp[${JSON.stringify(browserObserverProperty)}].${expression}`
+}
+
+/** A single Firefox Native Messaging native-host process. */
 export class NativeMessagingSession extends EventEmitter {
   readonly stdin = makeReadable()
   readonly stdout = makeReadable()
@@ -87,7 +332,6 @@ export class NativeMessagingSession extends EventEmitter {
   startedAt?: number
   exitedAt?: number
   private currentState: NativeMessagingProcessState = 'starting'
-
   private readonly streams: Record<NativeMessagingChannel, Readable> = {
     stdin: this.stdin,
     stdout: this.stdout,
@@ -104,8 +348,7 @@ export class NativeMessagingSession extends EventEmitter {
 
   constructor(
     readonly hostName: string,
-    readonly pid: number | undefined,
-    readonly launcherPid: number
+    readonly pid: number
   ) {
     super()
     this.frameDecoders = {
@@ -118,6 +361,7 @@ export class NativeMessagingSession extends EventEmitter {
   get messages(): readonly NativeMessagingMessage[] {
     return this.messagesHistory
   }
+
   get state(): NativeMessagingProcessState {
     return this.currentState
   }
@@ -145,7 +389,6 @@ export class NativeMessagingSession extends EventEmitter {
         new Error(`Native messaging host ${this.hostName} exited before a message`)
       )
     }
-
     return new Promise((resolve, reject) => {
       const waiter: MessageWaiter = { direction: options.direction, resolve, reject }
       if (options.timeout !== undefined && options.timeout > 0) {
@@ -158,10 +401,9 @@ export class NativeMessagingSession extends EventEmitter {
     })
   }
 
-  /** Wait until Firefox's native-host process exits. */
+  /** Wait until the native-host process exits. */
   waitForExit(options: NativeMessagingWaitOptions = {}): Promise<NativeMessagingExit> {
     if (this.exitResult) return Promise.resolve(this.exitResult)
-
     return new Promise((resolve, reject) => {
       const onExit = (exit: NativeMessagingExit) => {
         cleanup()
@@ -243,12 +485,12 @@ export class NativeMessagingSession extends EventEmitter {
   }
 
   private retainHistory(message: NativeMessagingMessage): void {
-    if (message.raw.length > MAX_RETAINED_MESSAGE_BYTES) return
+    if (message.raw.length > maxRetainedMessageBytes) return
     this.messagesHistory.push(message)
     this.historyBytes += message.raw.length
     while (
-      this.messagesHistory.length > MAX_RETAINED_MESSAGES ||
-      this.historyBytes > MAX_RETAINED_MESSAGE_BYTES
+      this.messagesHistory.length > maxRetainedMessages ||
+      this.historyBytes > maxRetainedMessageBytes
     ) {
       const removed = this.messagesHistory.shift()
       if (!removed) break
@@ -257,12 +499,12 @@ export class NativeMessagingSession extends EventEmitter {
   }
 
   private retainQueuedMessage(message: NativeMessagingMessage): void {
-    if (message.raw.length > MAX_RETAINED_MESSAGE_BYTES) return
+    if (message.raw.length > maxRetainedMessageBytes) return
     this.queuedMessages.push(message)
     this.queuedMessageBytes += message.raw.length
     while (
-      this.queuedMessages.length > MAX_RETAINED_MESSAGES ||
-      this.queuedMessageBytes > MAX_RETAINED_MESSAGE_BYTES
+      this.queuedMessages.length > maxRetainedMessages ||
+      this.queuedMessageBytes > maxRetainedMessageBytes
     ) {
       const removed = this.queuedMessages.shift()
       if (!removed) break
@@ -295,10 +537,9 @@ class NativeMessageFrameDecoder {
       const frameLength = payloadLength + 4
       if (this.pending.length < frameLength) return
       const raw = Buffer.from(this.pending.subarray(0, frameLength))
-      const payload = raw.subarray(4)
       this.pending = this.pending.subarray(frameLength)
       try {
-        this.onMessage(raw, JSON.parse(payload.toString('utf8')) as unknown)
+        this.onMessage(raw, JSON.parse(raw.subarray(4).toString('utf8')) as unknown)
       } catch {
         // Invalid frames remain available in the raw stream, but are not decoded as messages.
       }
@@ -306,70 +547,82 @@ class NativeMessageFrameDecoder {
   }
 }
 
-/** Collects isolated native-host sessions for one Firefox context. */
 export class NativeMessagingObserver extends EventEmitter {
-  readonly socketPath?: string
-  private readonly server?: Server
+  private readonly sessionsByBrowserId = new Map<number, NativeMessagingSession>()
   private readonly nativeSessions: NativeMessagingSession[] = []
-  private readonly sockets = new Set<Socket>()
   private readonly sessionWaiters: SessionWaiter[] = []
+  private readonly configurations: Record<string, NativeMessagingObserverConfig>
+  private evaluation?: RdpEvaluation
+  private pollTimer?: ReturnType<typeof setInterval>
+  private polling?: Promise<void>
+  private stopping = false
   private closed = false
   private closePromise?: Promise<void>
 
-  private constructor(socketPath?: string) {
+  constructor(configurations: Record<string, NativeMessagingObserverConfig> = {}) {
     super()
-    this.socketPath = socketPath
-    if (socketPath) {
-      this.server = createServer((socket) => this.accept(socket))
-      this.server.on('error', () => undefined)
+    this.configurations = { ...configurations }
+    for (const [hostName, config] of Object.entries(this.configurations)) {
+      if (config.mode !== 'non-blocking' && config.mode !== 'blocking') {
+        throw new Error(`nativeMessagingObservers['${hostName}'].mode is invalid`)
+      }
+      if (config.onData !== undefined && typeof config.onData !== 'function') {
+        throw new Error(`nativeMessagingObservers['${hostName}'].onData must be a function`)
+      }
     }
   }
 
-  static async create(userDataDir: string, enabled = true): Promise<NativeMessagingObserver> {
-    if (!enabled) return new NativeMessagingObserver()
-    if (process.platform !== 'linux' && process.platform !== 'darwin') {
-      throw new Error(
-        'Harness native messaging hosts require Linux or macOS directory-based manifests'
-      )
-    }
-    const socketPath = join(userDataDir, 'native-messaging-observer.sock')
-    const observer = new NativeMessagingObserver(socketPath)
-    const server = observer.server!
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => reject(error)
-      server.once('error', onError)
-      server.listen(socketPath, () => {
-        server.off('error', onError)
-        resolve()
-      })
-    })
-    try {
-      await chmod(socketPath, 0o600)
-    } catch (error) {
-      await observer.close()
-      throw error
-    }
-    return observer
+  get enabled(): boolean {
+    return Object.keys(this.configurations).length > 0
   }
 
   get sessions(): readonly NativeMessagingSession[] {
     return this.nativeSessions
   }
 
-  /** Wait for a newly observed host, or return the most recently observed matching session. */
+  async start(rdp: FirefoxRDP, chromeTarget: TargetFront): Promise<void> {
+    if (!this.enabled || this.evaluation) return
+    if (this.closed || this.stopping) {
+      throw new Error('Native messaging observation has been closed')
+    }
+    const consoleActor = chromeTarget.console()
+    await consoleActor.call('startListeners', { listeners: ['evaluationResult'] })
+    this.evaluation = new RdpEvaluation(rdp, consoleActor)
+    const modes = Object.fromEntries(
+      Object.entries(this.configurations).map(([hostName, config]) => [hostName, config.mode])
+    ) as Record<string, NativeMessagingObserverMode>
+    try {
+      await this.evaluation.evaluate(buildObserverBootstrap(modes))
+    } catch (error) {
+      this.evaluation.dispose()
+      this.evaluation = undefined
+      throw error
+    }
+    this.pollTimer = setInterval(() => {
+      void this.poll().catch((error) => {
+        if (!this.closed) this.emit('observerError', error)
+      })
+    }, 20)
+  }
+
   waitForSession(
     hostName?: string,
     options: NativeMessagingSessionWaitOptions = {}
   ): Promise<NativeMessagingSession> {
+    if (!this.enabled) {
+      return Promise.reject(new Error('No Native Messaging host observers are configured'))
+    }
+    if (hostName !== undefined && !this.configurations[hostName]) {
+      return Promise.reject(new Error(`Native Messaging observer is not enabled for ${hostName}`))
+    }
+    if (this.closed || this.stopping) {
+      return Promise.reject(new Error('Native messaging observation is closing'))
+    }
     const existing = this.nativeSessions
       .slice(Math.max(0, options.after ?? 0))
       .reverse()
       .find((session) => hostName === undefined || session.hostName === hostName)
     if (existing) return Promise.resolve(existing)
-    if (this.closed) {
-      return Promise.reject(new Error('Native messaging observation has been closed'))
-    }
-
     return new Promise((resolve, reject) => {
       const waiter: SessionWaiter = { hostName, resolve, reject }
       if (options.timeout !== undefined && options.timeout > 0) {
@@ -392,67 +645,96 @@ export class NativeMessagingObserver extends EventEmitter {
     return this.closePromise
   }
 
-  private accept(socket: Socket): void {
-    if (this.closed) {
-      socket.destroy()
+  private poll(): Promise<void> {
+    if (this.closed || this.stopping || !this.evaluation) return Promise.resolve()
+    if (this.polling) return this.polling
+    this.polling = this.drainEvents().finally(() => {
+      this.polling = undefined
+    })
+    return this.polling
+  }
+
+  private async drainEvents(closing = false): Promise<void> {
+    if (!this.evaluation) return
+    const events = await this.evaluation.evaluate<BrowserObserverEvent[]>(
+      createObserverEvaluation('takeEvents()')
+    )
+    for (const event of events) this.handleBrowserEvent(event, closing)
+  }
+
+  private handleBrowserEvent(event: BrowserObserverEvent, closing = false): void {
+    if (event.type === 'start') {
+      const session = new NativeMessagingSession(event.hostName, event.pid)
+      session._markStarted()
+      this.nativeSessions.push(session)
+      this.sessionsByBrowserId.set(event.sessionId, session)
+      this.emit('session', session)
+      this.resolveSessionWaiters(session)
       return
     }
-    this.sockets.add(socket)
-    let pending = Buffer.alloc(0)
-    let session: NativeMessagingSession | undefined
-    socket.on('error', () => undefined)
-    socket.on('data', (chunk: Buffer) => {
-      pending = pending.length === 0 ? Buffer.from(chunk) : Buffer.concat([pending, chunk])
-      while (pending.length >= 4) {
-        const length = pending.readUInt32LE(0)
-        if (pending.length < length + 4) return
-        const payload = pending.subarray(4, length + 4)
-        pending = pending.subarray(length + 4)
-        let event: ProxyEvent
-        try {
-          event = JSON.parse(payload.toString('utf8')) as ProxyEvent
-        } catch {
-          socket.destroy()
-          return
-        }
-        if (event.type === 'start') {
-          if (
-            session ||
-            typeof event.hostName !== 'string' ||
-            typeof event.launcherPid !== 'number'
-          ) {
-            socket.destroy()
-            return
-          }
-          session = new NativeMessagingSession(
-            event.hostName,
-            typeof event.pid === 'number' ? event.pid : undefined,
-            event.launcherPid
-          )
-          session._markStarted()
-          this.nativeSessions.push(session)
-          this.emit('session', session)
-          this.resolveSessionWaiters(session)
-        } else if (event.type === 'data') {
-          if (!session || !['stdin', 'stdout', 'stderr'].includes(event.channel)) {
-            socket.destroy()
-            return
-          }
-          session._receive(event.channel, Buffer.from(event.bytes, 'base64'))
-        } else if (event.type === 'exit') {
-          session?._finish({ code: event.code, signal: event.signal })
-        } else if (event.type === 'error') {
-          session?.emit('hostError', new Error(event.message))
-        } else {
-          socket.destroy()
-          return
-        }
+
+    const session = this.sessionsByBrowserId.get(event.sessionId)
+    if (event.type === 'exit') {
+      session?._finish({ code: event.code, signal: null })
+      this.sessionsByBrowserId.delete(event.sessionId)
+      return
+    }
+
+    const bytes = Buffer.from(event.bytes, 'base64')
+    if (!session) {
+      if (this.configurations[event.hostName]?.mode === 'blocking' && !closing) {
+        void this.respond(event.eventId, bytes).catch(() => undefined)
       }
+      return
+    }
+    session._receive(event.channel, bytes)
+    const streamEvent: NativeMessagingStreamEvent = {
+      hostName: event.hostName,
+      pid: event.pid,
+      channel: event.channel,
+      bytes: Buffer.from(bytes),
+      session
+    }
+    this.emit('data', streamEvent)
+    const config = this.configurations[event.hostName]
+    if (closing || this.stopping || !config?.onData) {
+      if (config?.mode === 'blocking' && !closing && !this.stopping) {
+        void this.respond(event.eventId, bytes).catch((error) => this.emit('observerError', error))
+      }
+      return
+    }
+    if (config.mode === 'blocking') {
+      void this.handleBlockingData(config, event, streamEvent).catch((error) => {
+        this.emit('observerError', error)
+        void this.respond(event.eventId, bytes).catch(() => undefined)
+      })
+      return
+    }
+    void Promise.resolve(config.onData(streamEvent)).catch((error) => {
+      this.emit('observerError', error)
     })
-    socket.on('close', () => {
-      this.sockets.delete(socket)
-      session?._observerClosed()
-    })
+  }
+
+  private async handleBlockingData(
+    config: NativeMessagingObserverConfig,
+    event: BrowserDataEvent,
+    streamEvent: NativeMessagingStreamEvent
+  ): Promise<void> {
+    let replacement: NativeMessagingMutation = undefined
+    try {
+      replacement = await config.onData?.(streamEvent)
+    } catch (error) {
+      this.emit('observerError', error)
+    }
+    const bytes = replacement instanceof Uint8Array ? Buffer.from(replacement) : streamEvent.bytes
+    await this.respond(event.eventId, bytes)
+  }
+
+  private async respond(eventId: number, bytes: Buffer): Promise<void> {
+    if (!this.evaluation || this.closed) return
+    await this.evaluation.evaluate(
+      createObserverEvaluation(`respond(${eventId}, ${JSON.stringify(bytes.toString('base64'))})`)
+    )
   }
 
   private resolveSessionWaiters(session: NativeMessagingSession): void {
@@ -470,127 +752,29 @@ export class NativeMessagingObserver extends EventEmitter {
   }
 
   private async shutdown(): Promise<void> {
-    this.closed = true
+    this.stopping = true
+    clearInterval(this.pollTimer)
     for (const waiter of this.sessionWaiters.splice(0)) {
       clearTimeout(waiter.timer)
-      waiter.reject(new Error('Native messaging observation has been closed'))
+      waiter.reject(new Error('Native messaging observation is closing'))
     }
-    await Promise.all(
-      this.nativeSessions
-        .filter((session) => session.state !== 'exited')
-        .map((session) => session.waitForExit({ timeout: 1_000 }).catch(() => undefined))
-    )
-    for (const socket of this.sockets) socket.destroy()
-    for (const session of this.nativeSessions) session._observerClosed()
-    const server = this.server
-    const socketPath = this.socketPath
-    if (server && socketPath) {
-      await new Promise<void>((resolve) => server.close(() => resolve()))
-      await unlink(socketPath).catch(() => undefined)
+    await this.polling?.catch(() => undefined)
+    if (this.evaluation) {
+      try {
+        await this.evaluation.evaluate(createObserverEvaluation('unblock()'))
+        await this.evaluation.evaluate(createObserverEvaluation('stopHosts()'))
+        await this.drainEvents(true)
+        await this.evaluation.evaluate(createObserverEvaluation('close()'))
+        await this.drainEvents(true)
+      } catch {
+        // Firefox may already be closing when the observer is torn down.
+      }
+      this.evaluation.dispose()
+      this.evaluation = undefined
+    }
+    this.closed = true
+    for (const session of this.nativeSessions) {
+      if (session.state !== 'exited') session._observerClosed()
     }
   }
-}
-
-/** Source for the per-context launcher used to tee one native host's stdio. */
-export function nativeMessagingProxySource(
-  hostName: string,
-  executable: string,
-  socketPath: string
-): string {
-  return `#!/usr/bin/env node
-import { spawn } from 'node:child_process'
-import { createConnection } from 'node:net'
-
-const hostName = __HOST_NAME__
-const executable = __HOST_EXECUTABLE__
-const socketPath = __OBSERVER_SOCKET__
-const observer = createConnection({ path: socketPath })
-const queued = []
-let observerReady = false
-let observerFailed = false
-let closeObserverWhenReady = false
-
-function encode(event) {
-  const payload = Buffer.from(JSON.stringify(event), 'utf8')
-  const length = Buffer.alloc(4)
-  length.writeUInt32LE(payload.length, 0)
-  return Buffer.concat([length, payload])
-}
-
-function flushObserver() {
-  if (!observerReady || observerFailed) return
-  while (queued.length) observer.write(queued.shift())
-  if (closeObserverWhenReady) observer.end()
-}
-
-function report(event) {
-  if (observerFailed) return
-  const record = encode(event)
-  if (!observerReady) queued.push(record)
-  else observer.write(record)
-}
-
-observer.on('connect', () => {
-  observerReady = true
-  flushObserver()
-})
-observer.on('error', () => {
-  observerFailed = true
-  queued.length = 0
-})
-
-const child = spawn(executable, process.argv.slice(2), { stdio: ['pipe', 'pipe', 'pipe'] })
-child.stdin.on('error', () => undefined)
-let announced = false
-let childClosed = false
-const announceStart = () => {
-  if (announced) return
-  announced = true
-  report({ type: 'start', hostName, pid: child.pid ?? null, launcherPid: process.pid })
-}
-
-child.once('spawn', () => {
-  announceStart()
-  process.stdin.on('data', (chunk) => {
-    if (!child.stdin.write(chunk)) process.stdin.pause()
-    report({ type: 'data', channel: 'stdin', bytes: chunk.toString('base64') })
-  })
-  child.stdin.on('drain', () => process.stdin.resume())
-  process.stdin.on('end', () => child.stdin.end())
-  process.stdin.on('error', () => child.stdin.destroy())
-})
-child.once('error', (error) => {
-  announceStart()
-  report({ type: 'error', message: String(error) })
-})
-child.stdout.on('data', (chunk) => {
-  if (!process.stdout.write(chunk)) child.stdout.pause()
-  report({ type: 'data', channel: 'stdout', bytes: chunk.toString('base64') })
-})
-child.stdout.on('error', () => undefined)
-child.stderr.on('data', (chunk) => {
-  if (!process.stderr.write(chunk)) child.stderr.pause()
-  report({ type: 'data', channel: 'stderr', bytes: chunk.toString('base64') })
-})
-child.stderr.on('error', () => undefined)
-process.stdout.on('drain', () => child.stdout.resume())
-process.stderr.on('drain', () => child.stderr.resume())
-process.stdout.on('error', () => child.kill())
-process.stderr.on('error', () => child.kill())
-for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
-  process.on(signal, () => child.kill(signal))
-}
-child.on('close', (code, signal) => {
-  if (childClosed) return
-  childClosed = true
-  process.stdin.pause()
-  report({ type: 'exit', code, signal })
-  if (observerReady) observer.end()
-  else closeObserverWhenReady = true
-  process.exitCode = code ?? 1
-})
-`
-    .replace('__HOST_NAME__', JSON.stringify(hostName))
-    .replace('__HOST_EXECUTABLE__', JSON.stringify(executable))
-    .replace('__OBSERVER_SOCKET__', JSON.stringify(socketPath))
 }

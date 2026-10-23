@@ -72,12 +72,17 @@ export async function launchFirefoxExtension(
   let nativeMessaging: NativeMessagingObserver | undefined
   let nativeManifestBaseDir: string | undefined
   try {
-    const hasNativeMessagingHosts = Object.keys(config.nativeMessagingHosts ?? {}).length > 0
-    nativeMessaging = await NativeMessagingObserver.create(userDataDir, hasNativeMessagingHosts)
+    nativeMessaging = new NativeMessagingObserver(config.nativeMessagingObservers)
+    for (const hostName of Object.keys(config.nativeMessagingObservers ?? {})) {
+      if (!config.nativeMessagingHosts?.[hostName]) {
+        throw new Error(
+          `nativeMessagingObservers['${hostName}'] requires a matching nativeMessagingHosts entry`
+        )
+      }
+    }
     nativeManifestBaseDir = await prepareNativeMessagingHosts(
       userDataDir,
-      config.nativeMessagingHosts,
-      nativeMessaging.socketPath
+      config.nativeMessagingHosts
     )
     if (config.patchFirefox !== false) await ensureFirefoxPatched()
     await assertClosedShadowSelectorPatched()
@@ -92,11 +97,19 @@ export async function launchFirefoxExtension(
     diagnostics = new FirefoxErrorDiagnostics(session)
     await diagnostics.start()
     ;(context as InternalFirefoxContext)._firefoxHarnessDiagnostics = diagnostics
+    const chromeTarget = session.chromeTarget
     if (nativeManifestBaseDir) {
-      const chromeTarget = session.chromeTarget
       if (!chromeTarget)
         throw new Error('Firefox RDP did not expose the chrome target for native manifest setup')
       await configureNativeMessagingDirectory(session.rdp, chromeTarget, nativeManifestBaseDir)
+    }
+    if (nativeMessaging.enabled) {
+      if (!chromeTarget) {
+        throw new Error(
+          'Firefox RDP did not expose a chrome target for native messaging observation'
+        )
+      }
+      await nativeMessaging.start(session.rdp, chromeTarget)
     }
     const installed = await session.installExtension(extensionPath)
     diagnostics.setExtensionId(installed.id)
@@ -122,13 +135,13 @@ export async function launchFirefoxExtension(
           await localMode?.close()
         } finally {
           try {
-            await extension?.close()
+            await nativeMessaging?.close()
           } finally {
             try {
-              await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
+              await extension?.close()
             } finally {
               try {
-                await nativeMessaging?.close()
+                await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
               } finally {
                 try {
                   await removeTempDir(userDataDir)
@@ -144,6 +157,7 @@ export async function launchFirefoxExtension(
     return result
   } catch (error) {
     await localMode?.close().catch(() => {})
+    await nativeMessaging?.close().catch(() => undefined)
     if (extension) {
       await extension.close().catch(() => {})
     } else {
@@ -151,7 +165,6 @@ export async function launchFirefoxExtension(
       session?.close()
     }
     await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined).catch(() => undefined)
-    await nativeMessaging?.close().catch(() => undefined)
     await removeTempDir(userDataDir).finally(() => releasePort.release())
     throw error
   }

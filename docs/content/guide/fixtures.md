@@ -112,13 +112,16 @@ const test = createFirefoxFixtures(base, {
       description: 'Echo host for tests',
       allowedExtensions: ['my-addon@example.org']
     }
+  },
+  nativeMessagingObservers: {
+    'org.example.echo': { mode: 'non-blocking' }
   }
 })
 ```
 
-The extension must request the `nativeMessaging` permission, and its Gecko ID must appear in `allowedExtensions`. Executable paths resolve from the current working directory and must be executable. The host uses Firefox's native stdio framing and receives its manifest path and extension ID as arguments.
+The extension must request the `nativeMessaging` permission, and its Gecko ID must appear in `allowedExtensions`. Executable paths resolve from the current working directory and are written to the manifest without checking whether the binary exists or is executable; Firefox reports launch failures when the extension uses the host. The host receives its manifest path and extension ID as arguments.
 
-The `nativeMessaging` fixture exposes sessions for each host process. A session includes `hostName`, the host `pid`, lifecycle state and timestamps, raw `Readable` streams for `stdin`, `stdout` and `stderr`, and decoded JSON frames on `stdin`/`stdout`. Use `waitForSession(hostName, { timeout })`, `session.waitForMessage({ direction, timeout })`, and `session.waitForExit({ timeout })` for event-driven synchronization. A context-local launcher tees these streams while invoking the configured executable unchanged.
+The `nativeMessaging` fixture exposes sessions only for names explicitly listed in `nativeMessagingObservers`; registering a host does not enable observation. The harness hooks Firefox's Native Messaging process streams inside Firefox through privileged RDP evaluation—there is no executable proxy. `non-blocking` delivers observations without waiting. `blocking` awaits `onData(event)`; returning a `Buffer` or `Uint8Array` replaces those bytes before Firefox forwards them, while returning `undefined` passes them through.
 
 The session emits a `message` event for every decoded frame. `session.messages` and frames buffered for later `waitForMessage()` calls retain at most 256 messages or 4 MiB each; for persistent hosts, wait or subscribe as messages arrive. Consume raw streams to avoid retaining unread bytes.
 

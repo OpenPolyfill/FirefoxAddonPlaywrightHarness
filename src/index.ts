@@ -12,7 +12,11 @@ export type {
   NativeMessagingMessageWaitOptions,
   NativeMessagingProcessState,
   NativeMessagingSessionWaitOptions,
-  NativeMessagingWaitOptions
+  NativeMessagingWaitOptions,
+  NativeMessagingMutation,
+  NativeMessagingObserverConfig,
+  NativeMessagingObserverMode,
+  NativeMessagingStreamEvent
 } from './native-messaging-observer.js'
 export type {
   ActionKind,

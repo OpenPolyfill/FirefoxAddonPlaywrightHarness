@@ -1,7 +1,10 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import type { FirefoxRDP } from '@openpolyfill/firefox-rdp'
 import type { FirefoxErrorDiagnostics } from './diagnostics.js'
-import type { NativeMessagingObserver } from './native-messaging-observer.js'
+import type {
+  NativeMessagingObserver,
+  NativeMessagingObserverConfig
+} from './native-messaging-observer.js'
 export type ActionKind = 'browserAction' | 'pageAction'
 export type UrlMatcher = string | RegExp
 
@@ -11,7 +14,7 @@ export interface FirefoxHarnessProjectOptions {
 }
 
 export interface NativeMessagingHostConfig {
-  /** Executable Firefox launches for this native messaging host. */
+  /** Host executable path recorded in the manifest; the harness does not preflight it. */
   executable: string
   /** Firefox extension IDs allowed to connect to the host. */
   allowedExtensions: string[]
@@ -27,6 +30,8 @@ export interface FirefoxHarnessConfig {
   postInstallPages?: UrlMatcher[]
   /** Native messaging hosts isolated to this Firefox instance on Linux/macOS. */
   nativeMessagingHosts?: Record<string, NativeMessagingHostConfig>
+  /** Per-host opt-in for observing and optionally blocking/mutating native stdio. */
+  nativeMessagingObservers?: Record<string, NativeMessagingObserverConfig>
   /** Hostname-to-directory mappings served by Firefox 153+ DevTools Local Mode. */
   localMappings?: Record<string, string>
   patchFirefox?: boolean

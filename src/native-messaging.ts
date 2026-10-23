@@ -1,9 +1,7 @@
-import { constants } from 'node:fs'
-import { access, mkdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { FirefoxRDP, TargetFront } from '@openpolyfill/firefox-rdp'
 import { RdpEvaluation } from './rdp.js'
-import { nativeMessagingProxySource } from './native-messaging-observer.js'
 import type { NativeMessagingHostConfig } from './types.js'
 declare const Cc: Record<
   string,
@@ -29,17 +27,13 @@ const nativeHostNamePattern = /^\w+(?:\.\w+)*$/
 
 export async function prepareNativeMessagingHosts(
   userDataDir: string,
-  hosts: Record<string, NativeMessagingHostConfig> | undefined,
-  observerSocketPath: string | undefined
+  hosts: Record<string, NativeMessagingHostConfig> | undefined
 ): Promise<string | undefined> {
   if (!hosts || Object.keys(hosts).length === 0) return undefined
   if (process.platform !== 'linux' && process.platform !== 'darwin') {
     throw new Error(
       'Harness native messaging hosts require Linux or macOS directory-based manifests'
     )
-  }
-  if (!observerSocketPath) {
-    throw new Error('Native messaging observer socket path is missing')
   }
 
   const manifestBaseDir = join(userDataDir, 'native-messaging')
@@ -48,8 +42,6 @@ export async function prepareNativeMessagingHosts(
     process.platform === 'linux' ? 'native-messaging-hosts' : 'NativeMessagingHosts'
   )
   await mkdir(manifestDirectory, { recursive: true, mode: 0o700 })
-  const proxyDirectory = join(manifestBaseDir, 'native-host-proxies')
-  await mkdir(proxyDirectory, { recursive: true, mode: 0o700 })
 
   for (const [name, host] of Object.entries(hosts)) {
     if (!nativeHostNamePattern.test(name)) {
@@ -71,29 +63,10 @@ export async function prepareNativeMessagingHosts(
       throw new Error(`nativeMessagingHosts['${name}'].description must be a string`)
     }
 
-    const executable = resolve(host.executable)
-    try {
-      const executableInfo = await stat(executable)
-      if (!executableInfo.isFile()) throw new Error('not a file')
-      await access(executable, constants.X_OK)
-    } catch (error) {
-      throw new Error(
-        `Native messaging host executable is missing or not executable: ${executable}`,
-        {
-          cause: error
-        }
-      )
-    }
-    const proxyPath = join(proxyDirectory, `${name}.mjs`)
-    await writeFile(proxyPath, nativeMessagingProxySource(name, executable, observerSocketPath), {
-      flag: 'wx',
-      mode: 0o700
-    })
-
     const manifest = {
       name,
       description: host.description?.trim() || name,
-      path: proxyPath,
+      path: resolve(host.executable),
       type: 'stdio',
       allowed_extensions: [...host.allowedExtensions]
     }
