@@ -120,6 +120,8 @@ The extension must request the `nativeMessaging` permission, and its Gecko ID mu
 
 The `nativeMessaging` fixture exposes sessions for each host process. A session includes `hostName`, the host `pid`, lifecycle state and timestamps, raw `Readable` streams for `stdin`, `stdout` and `stderr`, and decoded JSON frames on `stdin`/`stdout`. Use `waitForSession(hostName, { timeout })`, `session.waitForMessage({ direction, timeout })`, and `session.waitForExit({ timeout })` for event-driven synchronization. A context-local launcher tees these streams while invoking the configured executable unchanged.
 
+The session emits a `message` event for every decoded frame. `session.messages` and frames buffered for later `waitForMessage()` calls retain at most 256 messages or 4 MiB each; for persistent hosts, wait or subscribe as messages arrive. Consume raw streams to avoid retaining unread bytes.
+
 On Linux, the harness writes manifests under a unique temporary directory for each Firefox instance, then uses privileged RDP evaluation to set `XREUserNativeManifests` before initializing Firefox's native manifest cache. It does not write to `~/.mozilla/native-messaging-hosts`. The worker or test fixture teardown closes Firefox (which shuts down native hosts) before removing the temporary profile and manifests.
 
 ## Extension handle

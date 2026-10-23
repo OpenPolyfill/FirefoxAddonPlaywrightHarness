@@ -72,7 +72,8 @@ export async function launchFirefoxExtension(
   let nativeMessaging: NativeMessagingObserver | undefined
   let nativeManifestBaseDir: string | undefined
   try {
-    nativeMessaging = await NativeMessagingObserver.create(userDataDir)
+    const hasNativeMessagingHosts = Object.keys(config.nativeMessagingHosts ?? {}).length > 0
+    nativeMessaging = await NativeMessagingObserver.create(userDataDir, hasNativeMessagingHosts)
     nativeManifestBaseDir = await prepareNativeMessagingHosts(
       userDataDir,
       config.nativeMessagingHosts,

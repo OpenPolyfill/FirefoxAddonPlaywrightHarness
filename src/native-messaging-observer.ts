@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { chmod, unlink } from 'node:fs/promises'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { Readable } from 'node:stream'
 
@@ -67,6 +67,8 @@ interface ProxyExitEvent {
 
 type ProxyEvent =
   ProxyStartEvent | ProxyDataEvent | ProxyExitEvent | { type: 'error'; message: string }
+const MAX_RETAINED_MESSAGES = 256
+const MAX_RETAINED_MESSAGE_BYTES = 4 * 1024 * 1024
 
 function makeReadable(): Readable {
   return new Readable({ read() {} })
@@ -93,6 +95,8 @@ export class NativeMessagingSession extends EventEmitter {
   }
   private readonly messagesHistory: NativeMessagingMessage[] = []
   private queuedMessages: NativeMessagingMessage[] = []
+  private historyBytes = 0
+  private queuedMessageBytes = 0
   private readonly messageWaiters: MessageWaiter[] = []
   private readonly frameDecoders: Record<NativeMessagingDirection, NativeMessageFrameDecoder>
   private exitResult?: NativeMessagingExit
@@ -110,6 +114,7 @@ export class NativeMessagingSession extends EventEmitter {
     }
   }
 
+  /** Recent decoded frames retained for inspection, within a bounded history. */
   get messages(): readonly NativeMessagingMessage[] {
     return this.messagesHistory
   }
@@ -131,7 +136,9 @@ export class NativeMessagingSession extends EventEmitter {
       (message) => options.direction === undefined || message.direction === options.direction
     )
     if (queuedIndex !== -1) {
-      return Promise.resolve(this.queuedMessages.splice(queuedIndex, 1)[0]!)
+      const [queued] = this.queuedMessages.splice(queuedIndex, 1)
+      this.queuedMessageBytes -= queued!.raw.length
+      return Promise.resolve(queued!)
     }
     if (this.state === 'exited') {
       return Promise.reject(
@@ -221,18 +228,46 @@ export class NativeMessagingSession extends EventEmitter {
 
   private _message(direction: NativeMessagingDirection, raw: Buffer, message: unknown): void {
     const observed: NativeMessagingMessage = { direction, message, raw: Buffer.from(raw) }
-    this.messagesHistory.push(observed)
+    this.retainHistory(observed)
     const waiterIndex = this.messageWaiters.findIndex(
       (waiter) => waiter.direction === undefined || waiter.direction === direction
     )
     if (waiterIndex === -1) {
-      this.queuedMessages.push(observed)
+      this.retainQueuedMessage(observed)
     } else {
       const [waiter] = this.messageWaiters.splice(waiterIndex, 1)
       clearTimeout(waiter!.timer)
       waiter!.resolve(observed)
     }
     this.emit('message', observed)
+  }
+
+  private retainHistory(message: NativeMessagingMessage): void {
+    if (message.raw.length > MAX_RETAINED_MESSAGE_BYTES) return
+    this.messagesHistory.push(message)
+    this.historyBytes += message.raw.length
+    while (
+      this.messagesHistory.length > MAX_RETAINED_MESSAGES ||
+      this.historyBytes > MAX_RETAINED_MESSAGE_BYTES
+    ) {
+      const removed = this.messagesHistory.shift()
+      if (!removed) break
+      this.historyBytes -= removed.raw.length
+    }
+  }
+
+  private retainQueuedMessage(message: NativeMessagingMessage): void {
+    if (message.raw.length > MAX_RETAINED_MESSAGE_BYTES) return
+    this.queuedMessages.push(message)
+    this.queuedMessageBytes += message.raw.length
+    while (
+      this.queuedMessages.length > MAX_RETAINED_MESSAGES ||
+      this.queuedMessageBytes > MAX_RETAINED_MESSAGE_BYTES
+    ) {
+      const removed = this.queuedMessages.shift()
+      if (!removed) break
+      this.queuedMessageBytes -= removed.raw.length
+    }
   }
 
   private removeMessageWaiter(waiter: MessageWaiter): void {
@@ -273,42 +308,46 @@ class NativeMessageFrameDecoder {
 
 /** Collects isolated native-host sessions for one Firefox context. */
 export class NativeMessagingObserver extends EventEmitter {
-  readonly socketPath: string
-  private readonly server: Server
+  readonly socketPath?: string
+  private readonly server?: Server
   private readonly nativeSessions: NativeMessagingSession[] = []
   private readonly sockets = new Set<Socket>()
   private readonly sessionWaiters: SessionWaiter[] = []
   private closed = false
   private closePromise?: Promise<void>
 
-  private constructor(socketPath: string) {
+  private constructor(socketPath?: string) {
     super()
     this.socketPath = socketPath
-    this.server = createServer((socket) => this.accept(socket))
-    this.server.on('error', () => undefined)
+    if (socketPath) {
+      this.server = createServer((socket) => this.accept(socket))
+      this.server.on('error', () => undefined)
+    }
   }
 
-  static async create(userDataDir: string): Promise<NativeMessagingObserver> {
-    const socketPath =
-      process.platform === 'win32'
-        ? `\\\\.\\pipe\\openpolyfill-native-messaging-${basename(userDataDir)}`
-        : join(userDataDir, 'native-messaging-observer.sock')
+  static async create(userDataDir: string, enabled = true): Promise<NativeMessagingObserver> {
+    if (!enabled) return new NativeMessagingObserver()
+    if (process.platform !== 'linux' && process.platform !== 'darwin') {
+      throw new Error(
+        'Harness native messaging hosts require Linux or macOS directory-based manifests'
+      )
+    }
+    const socketPath = join(userDataDir, 'native-messaging-observer.sock')
     const observer = new NativeMessagingObserver(socketPath)
+    const server = observer.server!
     await new Promise<void>((resolve, reject) => {
       const onError = (error: Error) => reject(error)
-      observer.server.once('error', onError)
-      observer.server.listen(observer.socketPath, () => {
-        observer.server.off('error', onError)
+      server.once('error', onError)
+      server.listen(socketPath, () => {
+        server.off('error', onError)
         resolve()
       })
     })
-    if (process.platform !== 'win32') {
-      try {
-        await chmod(observer.socketPath, 0o600)
-      } catch (error) {
-        await observer.close()
-        throw error
-      }
+    try {
+      await chmod(socketPath, 0o600)
+    } catch (error) {
+      await observer.close()
+      throw error
     }
     return observer
   }
@@ -443,8 +482,12 @@ export class NativeMessagingObserver extends EventEmitter {
     )
     for (const socket of this.sockets) socket.destroy()
     for (const session of this.nativeSessions) session._observerClosed()
-    await new Promise<void>((resolve) => this.server.close(() => resolve()))
-    await unlink(this.socketPath).catch(() => undefined)
+    const server = this.server
+    const socketPath = this.socketPath
+    if (server && socketPath) {
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+      await unlink(socketPath).catch(() => undefined)
+    }
   }
 }
 

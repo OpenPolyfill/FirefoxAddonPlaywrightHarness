@@ -30,13 +30,16 @@ const nativeHostNamePattern = /^\w+(?:\.\w+)*$/
 export async function prepareNativeMessagingHosts(
   userDataDir: string,
   hosts: Record<string, NativeMessagingHostConfig> | undefined,
-  observerSocketPath: string
+  observerSocketPath: string | undefined
 ): Promise<string | undefined> {
   if (!hosts || Object.keys(hosts).length === 0) return undefined
   if (process.platform !== 'linux' && process.platform !== 'darwin') {
     throw new Error(
       'Harness native messaging hosts require Linux or macOS directory-based manifests'
     )
+  }
+  if (!observerSocketPath) {
+    throw new Error('Native messaging observer socket path is missing')
   }
 
   const manifestBaseDir = join(userDataDir, 'native-messaging')
