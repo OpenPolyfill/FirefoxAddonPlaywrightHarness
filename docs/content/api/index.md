@@ -18,6 +18,7 @@ See [Generated API](/docs/api/reference) for TypeDoc pages generated from `src/i
 - `extension.activateAction(page, kind)` — invoke an action and open its popup. Use `{ waitForPopup: false }` for click-only actions.
 - `extension.activateSidebar(page)` — open the extension sidebar and return its Playwright `Page`.
 - `rdp.root.listTabs()` — access the raw `FirefoxRDP` client from a test.
+- `nativeMessaging` — inspect host sessions, raw stdio, decoded Native Messaging frames, and process exit events.
 
 Start with [Getting started](/docs/guide/getting-started) or [Fixtures and evaluation](/docs/guide/fixtures).
 

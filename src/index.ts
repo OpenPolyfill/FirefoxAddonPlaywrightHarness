@@ -3,6 +3,17 @@ export { ensureFirefoxPatched } from './patch.js'
 export { createFirefoxFixtures, getFirefoxChromePages, withSharedPage } from './fixtures.js'
 export type { FirefoxFixtures } from './fixtures.js'
 export { FirefoxRdpSession, RdpEvaluation, RdpInspectedWindowEvaluation } from './rdp.js'
+export { NativeMessagingObserver, NativeMessagingSession } from './native-messaging-observer.js'
+export type {
+  NativeMessagingChannel,
+  NativeMessagingDirection,
+  NativeMessagingExit,
+  NativeMessagingMessage,
+  NativeMessagingMessageWaitOptions,
+  NativeMessagingProcessState,
+  NativeMessagingSessionWaitOptions,
+  NativeMessagingWaitOptions
+} from './native-messaging-observer.js'
 export type {
   ActionKind,
   EvaluateOptions,

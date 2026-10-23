@@ -13,6 +13,7 @@ description: 'Use page-bound helpers, Firefox chrome Pages, explicit page contex
 - `rdp` — the connected `FirefoxRDP` client from `@openpolyfill/firefox-rdp`.
 - `chromePage` — the primary Firefox `browser.xhtml` window as a Playwright `Page`.
 - `chromePages()` — returns the currently open browser chrome Pages.
+- `nativeMessaging` — observe per-process native host sessions and their stdio.
 
 ## Context and page lifetime
 
@@ -116,6 +117,8 @@ const test = createFirefoxFixtures(base, {
 ```
 
 The extension must request the `nativeMessaging` permission, and its Gecko ID must appear in `allowedExtensions`. Executable paths resolve from the current working directory and must be executable. The host uses Firefox's native stdio framing and receives its manifest path and extension ID as arguments.
+
+The `nativeMessaging` fixture exposes sessions for each host process. A session includes `hostName`, the host `pid`, lifecycle state and timestamps, raw `Readable` streams for `stdin`, `stdout` and `stderr`, and decoded JSON frames on `stdin`/`stdout`. Use `waitForSession(hostName, { timeout })`, `session.waitForMessage({ direction, timeout })`, and `session.waitForExit({ timeout })` for event-driven synchronization. A context-local launcher tees these streams while invoking the configured executable unchanged.
 
 On Linux, the harness writes manifests under a unique temporary directory for each Firefox instance, then uses privileged RDP evaluation to set `XREUserNativeManifests` before initializing Firefox's native manifest cache. It does not write to `~/.mozilla/native-messaging-hosts`. The worker or test fixture teardown closes Firefox (which shuts down native hosts) before removing the temporary profile and manifests.
 

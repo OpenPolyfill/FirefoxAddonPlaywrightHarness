@@ -11,6 +11,7 @@ import {
   configureNativeMessagingDirectory,
   prepareNativeMessagingHosts
 } from './native-messaging.js'
+import { NativeMessagingObserver } from './native-messaging-observer.js'
 import {
   attachFirefoxLocalMappings,
   resolveLocalMappings,
@@ -68,11 +69,14 @@ export async function launchFirefoxExtension(
   let extension: FirefoxExtension | undefined
   let diagnostics: FirefoxErrorDiagnostics | undefined
   let localMode: FirefoxLocalModeController | undefined
+  let nativeMessaging: NativeMessagingObserver | undefined
   let nativeManifestBaseDir: string | undefined
   try {
+    nativeMessaging = await NativeMessagingObserver.create(userDataDir)
     nativeManifestBaseDir = await prepareNativeMessagingHosts(
       userDataDir,
-      config.nativeMessagingHosts
+      config.nativeMessagingHosts,
+      nativeMessaging.socketPath
     )
     if (config.patchFirefox !== false) await ensureFirefoxPatched()
     await assertClosedShadowSelectorPatched()
@@ -80,6 +84,9 @@ export async function launchFirefoxExtension(
       userDataDir,
       launchOptions(config, releasePort.port)
     )
+    context.once('close', () => {
+      void nativeMessaging?.close()
+    })
     session = await FirefoxRdpSession.connect(releasePort.port)
     diagnostics = new FirefoxErrorDiagnostics(session)
     await diagnostics.start()
@@ -106,16 +113,30 @@ export async function launchFirefoxExtension(
       context,
       rdp: session.rdp,
       extension,
+      nativeMessaging,
       userDataDir,
       rdpPort: releasePort.port,
       close: async () => {
         try {
           await localMode?.close()
         } finally {
-          await extension?.close()
-          await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
-          await removeTempDir(userDataDir)
-          await releasePort.release()
+          try {
+            await extension?.close()
+          } finally {
+            try {
+              await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
+            } finally {
+              try {
+                await nativeMessaging?.close()
+              } finally {
+                try {
+                  await removeTempDir(userDataDir)
+                } finally {
+                  await releasePort.release()
+                }
+              }
+            }
+          }
         }
       }
     }
@@ -125,12 +146,12 @@ export async function launchFirefoxExtension(
     if (extension) {
       await extension.close().catch(() => {})
     } else {
-      await diagnostics?.close()
+      await diagnostics?.close().catch(() => undefined)
       session?.close()
     }
-    await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
-    await removeTempDir(userDataDir)
-    await releasePort.release()
+    await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined).catch(() => undefined)
+    await nativeMessaging?.close().catch(() => undefined)
+    await removeTempDir(userDataDir).finally(() => releasePort.release())
     throw error
   }
 }

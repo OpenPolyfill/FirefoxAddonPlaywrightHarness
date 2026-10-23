@@ -1,6 +1,7 @@
 import { access, readFile, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { Readable } from 'node:stream'
 import { launchFirefoxExtension } from '../../src/launch.js'
 import { baseTest, createFirefoxFixtures, expect } from './fixtures.js'
 import type { FirefoxExtension, InternalFirefoxContext } from '../../src/types.js'
@@ -70,30 +71,75 @@ async function waitForHostExit(pid: number): Promise<void> {
   }
   throw new Error(`Native messaging host process ${pid} did not exit`)
 }
+function nativeFrame(message: unknown): Buffer {
+  const payload = Buffer.from(JSON.stringify(message), 'utf8')
+  const length = Buffer.alloc(4)
+  length.writeUInt32LE(payload.length)
+  return Buffer.concat([length, payload])
+}
+
+async function readRawBytes(stream: Readable): Promise<Buffer> {
+  const chunks: Buffer[] = []
+  for await (const chunk of stream) chunks.push(Buffer.from(chunk))
+  return Buffer.concat(chunks)
+}
 
 workerTest(
-  'discovers its isolated manifest and supports sendNativeMessage',
-  async ({ context, extension }) => {
+  'discovers its isolated manifest and captures one-shot native messaging',
+  async ({ context, extension, nativeMessaging }) => {
     const manifestDirectory = nativeManifestDirectory(context)
     const manifestPath = join(manifestDirectory, `${nativeHostName}.json`)
     const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
     expect(manifest).toMatchObject({
       name: nativeHostName,
       type: 'stdio',
-      allowed_extensions: [nativeExtensionId],
-      path: nativeHostExecutable
+      allowed_extensions: [nativeExtensionId]
     })
+    expect(manifest.path).not.toBe(nativeHostExecutable)
+    expect(String(manifest.path)).toContain('native-host-proxies')
+    expect(await readFile(String(manifest.path), 'utf8')).toContain(
+      JSON.stringify(nativeHostExecutable)
+    )
 
+    const request = { text: 'one-shot' }
+    const sessionCount = nativeMessaging.sessions.length
+    const sessionPromise = nativeMessaging.waitForSession(nativeHostName, {
+      after: sessionCount,
+      timeout: 5_000
+    })
     let pid: number | undefined
     try {
-      const response = await sendNativeMessage(extension, { text: 'one-shot' })
+      const [response, session] = await Promise.all([
+        sendNativeMessage(extension, request),
+        sessionPromise
+      ])
       pid = response.pid
       expect(response).toMatchObject({
-        message: { text: 'one-shot' },
+        message: request,
         description: 'Worker-scoped native host',
         extensionId: nativeExtensionId,
         manifestPath
       })
+      expect(session.hostName).toBe(nativeHostName)
+      expect(session.pid).toBe(response.pid)
+      expect(session.launcherPid).not.toBe(response.pid)
+      expect(session.startedAt).toBeDefined()
+      expect(
+        (await session.waitForMessage({ direction: 'stdin', timeout: 5_000 })).message
+      ).toEqual(request)
+      expect(
+        (await session.waitForMessage({ direction: 'stdout', timeout: 5_000 })).message
+      ).toEqual(response)
+      expect(await session.waitForExit({ timeout: 5_000 })).toEqual({ code: 0, signal: null })
+      expect(session.state).toBe('exited')
+      expect(session.exitCode).toBe(0)
+      expect(session.exitedAt).toBeDefined()
+      const [rawInput, rawOutput] = await Promise.all([
+        readRawBytes(session.stdin),
+        readRawBytes(session.stdout)
+      ])
+      expect(rawInput).toEqual(nativeFrame(request))
+      expect(rawOutput).toEqual(nativeFrame(response))
       await waitForHostExit(response.pid)
     } finally {
       if (pid !== undefined) await rm(stoppedMarker(pid), { force: true })
@@ -102,11 +148,16 @@ workerTest(
 )
 
 workerTest(
-  'keeps connectNative open for multiple bidirectional messages',
-  async ({ extension }) => {
+  'keeps connectNative open and observes multiple bidirectional messages',
+  async ({ extension, nativeMessaging }) => {
     if (!extension.background)
       throw new Error('Native messaging extension has no background context')
-    const replies = await extension.background.evaluate<
+    const sessionCount = nativeMessaging.sessions.length
+    const sessionPromise = nativeMessaging.waitForSession(nativeHostName, {
+      after: sessionCount,
+      timeout: 5_000
+    })
+    const repliesPromise = extension.background.evaluate<
       NativeHostReply[]
     >(`(() => new Promise((resolve, reject) => {
     const port = browser.runtime.connectNative(${JSON.stringify(nativeHostName)});
@@ -127,14 +178,68 @@ workerTest(
     });
     port.postMessage({ text: 'first' });
   }))()`)
+    const [replies, session] = await Promise.all([repliesPromise, sessionPromise])
 
     expect(replies.map(({ message }) => message)).toEqual([{ text: 'first' }, { text: 'second' }])
     expect(replies[1].pid).toBe(replies[0].pid)
     expect(replies[1].manifestPath).toBe(replies[0].manifestPath)
+    expect(session.pid).toBe(replies[0].pid)
+    const observedInputs = [
+      (await session.waitForMessage({ direction: 'stdin', timeout: 5_000 })).message,
+      (await session.waitForMessage({ direction: 'stdin', timeout: 5_000 })).message
+    ]
+    const observedOutputs = [
+      (await session.waitForMessage({ direction: 'stdout', timeout: 5_000 })).message,
+      (await session.waitForMessage({ direction: 'stdout', timeout: 5_000 })).message
+    ]
+    expect(observedInputs).toEqual([{ text: 'first' }, { text: 'second' }])
+    expect(observedOutputs).toEqual(replies)
     try {
       await waitForHostExit(replies[0].pid)
+      expect(await session.waitForExit({ timeout: 5_000 })).toEqual({ code: 0, signal: null })
     } finally {
       await rm(stoppedMarker(replies[0].pid), { force: true })
+    }
+  }
+)
+
+workerTest(
+  'captures stderr and decodes partially written Native Messaging frames',
+  async ({ extension, nativeMessaging }) => {
+    const request = {
+      text: 'partial-frame',
+      stderr: 'diagnostic from native host\\n',
+      partialFrame: true
+    }
+    const sessionCount = nativeMessaging.sessions.length
+    const sessionPromise = nativeMessaging.waitForSession(nativeHostName, {
+      after: sessionCount,
+      timeout: 5_000
+    })
+    let pid: number | undefined
+    try {
+      const [response, session] = await Promise.all([
+        sendNativeMessage(extension, request),
+        sessionPromise
+      ])
+      pid = response.pid
+      expect(await session.waitForMessage({ direction: 'stdout', timeout: 5_000 })).toMatchObject({
+        direction: 'stdout',
+        message: response
+      })
+      expect(await session.waitForExit({ timeout: 5_000 })).toEqual({ code: 0, signal: null })
+      const [rawInput, rawOutput, rawStderr] = await Promise.all([
+        readRawBytes(session.stdin),
+        readRawBytes(session.stdout),
+        readRawBytes(session.stderr)
+      ])
+      expect(rawInput).toEqual(nativeFrame(request))
+      expect(rawOutput).toEqual(nativeFrame(response))
+      expect(rawStderr.toString('utf8')).toBe(request.stderr)
+      expect(session.messages).toHaveLength(2)
+      await waitForHostExit(response.pid)
+    } finally {
+      if (pid !== undefined) await rm(stoppedMarker(pid), { force: true })
     }
   }
 )
@@ -150,19 +255,29 @@ baseTest('fixture teardown stops an open native host and removes private manifes
   try {
     if (!running.extension.background)
       throw new Error('Native messaging extension has no background context')
-    const response = await running.extension.background
-      .evaluate<NativeHostReply>(`(() => new Promise(resolve => {
-      const port = browser.runtime.connectNative(${JSON.stringify(nativeHostName)});
-      globalThis.__harnessOpenNativePort = port;
-      port.onMessage.addListener(resolve);
-      port.postMessage({ text: 'keep-alive' });
-    }))()`)
+    const [response, session] = await Promise.all([
+      running.extension.background.evaluate<NativeHostReply>(`(() => new Promise(resolve => {
+        const port = browser.runtime.connectNative(${JSON.stringify(nativeHostName)});
+        globalThis.__harnessOpenNativePort = port;
+        port.onMessage.addListener(resolve);
+        port.postMessage({ text: 'keep-alive' });
+      }))()`),
+      running.nativeMessaging.waitForSession(nativeHostName, { timeout: 5_000 })
+    ])
     pid = response.pid
     expect(response.message).toEqual({ text: 'keep-alive' })
+    expect(session.hostName).toBe(nativeHostName)
+    expect(session.pid).toBe(response.pid)
+    expect((await session.waitForMessage({ direction: 'stdin', timeout: 5_000 })).message).toEqual({
+      text: 'keep-alive'
+    })
     await expect(access(stoppedMarker(pid))).rejects.toThrow()
 
     await running.close()
     closed = true
+    const exit = await session.waitForExit({ timeout: 5_000 })
+    expect(session.state).toBe('exited')
+    expect(exit.code !== null || exit.signal !== null).toBe(true)
     await waitForHostExit(pid)
     await expect(stat(running.userDataDir)).rejects.toThrow()
   } finally {
@@ -201,9 +316,17 @@ baseTest('isolates same-name hosts across concurrent Firefox worker contexts', a
   let secondClosed = false
   const pids: number[] = []
   try {
-    const [firstResponse, secondResponse] = await Promise.all([
+    const firstSessionPromise = first.nativeMessaging.waitForSession(nativeHostName, {
+      timeout: 5_000
+    })
+    const secondSessionPromise = second.nativeMessaging.waitForSession(nativeHostName, {
+      timeout: 5_000
+    })
+    const [firstResponse, secondResponse, firstSession, secondSession] = await Promise.all([
       sendNativeMessage(first.extension, { worker: 'first' }),
-      sendNativeMessage(second.extension, { worker: 'second' })
+      sendNativeMessage(second.extension, { worker: 'second' }),
+      firstSessionPromise,
+      secondSessionPromise
     ])
     pids.push(firstResponse.pid, secondResponse.pid)
     expect(firstResponse.description).toBe('First worker host')
@@ -212,8 +335,27 @@ baseTest('isolates same-name hosts across concurrent Firefox worker contexts', a
     expect(secondResponse.manifestPath).toContain(second.userDataDir)
     expect(firstResponse.manifestPath).not.toBe(secondResponse.manifestPath)
     expect(firstResponse.pid).not.toBe(secondResponse.pid)
+    expect(firstSession.hostName).toBe(nativeHostName)
+    expect(secondSession.hostName).toBe(nativeHostName)
+    expect(firstSession.pid).toBe(firstResponse.pid)
+    expect(secondSession.pid).toBe(secondResponse.pid)
+    const [firstInput, firstOutput, secondInput, secondOutput] = await Promise.all([
+      firstSession.waitForMessage({ direction: 'stdin', timeout: 5_000 }),
+      firstSession.waitForMessage({ direction: 'stdout', timeout: 5_000 }),
+      secondSession.waitForMessage({ direction: 'stdin', timeout: 5_000 }),
+      secondSession.waitForMessage({ direction: 'stdout', timeout: 5_000 })
+    ])
+    expect(firstInput.message).toEqual({ worker: 'first' })
+    expect(firstOutput.message).toEqual(firstResponse)
+    expect(secondInput.message).toEqual({ worker: 'second' })
+    expect(secondOutput.message).toEqual(secondResponse)
 
-    await Promise.all([waitForHostExit(firstResponse.pid), waitForHostExit(secondResponse.pid)])
+    await Promise.all([
+      waitForHostExit(firstResponse.pid),
+      waitForHostExit(secondResponse.pid),
+      firstSession.waitForExit({ timeout: 5_000 }),
+      secondSession.waitForExit({ timeout: 5_000 })
+    ])
     await first.close()
     firstClosed = true
     await second.close()

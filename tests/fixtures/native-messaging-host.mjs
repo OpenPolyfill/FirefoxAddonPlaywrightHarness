@@ -13,6 +13,23 @@ try {
 process.on('exit', () => writeFileSync(stoppedMarker, String(process.pid)))
 
 let pending = Buffer.alloc(0)
+let responseQueue = Promise.resolve()
+
+async function writeResponse(response, partialFrame) {
+  const responseBytes = Buffer.from(JSON.stringify(response), 'utf8')
+  const length = Buffer.alloc(4)
+  length.writeUInt32LE(responseBytes.length)
+  const frame = Buffer.concat([length, responseBytes])
+  if (!partialFrame) {
+    process.stdout.write(frame)
+    return
+  }
+  for (const part of [frame.subarray(0, 2), frame.subarray(2, 4), frame.subarray(4)]) {
+    process.stdout.write(part)
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
 process.stdin.on('data', (chunk) => {
   pending = Buffer.concat([pending, chunk])
   while (pending.length >= 4) {
@@ -20,18 +37,17 @@ process.stdin.on('data', (chunk) => {
     if (pending.length < messageLength + 4) return
     const messageBytes = pending.subarray(4, messageLength + 4)
     pending = pending.subarray(messageLength + 4)
-    const response = Buffer.from(
-      JSON.stringify({
-        message: JSON.parse(messageBytes.toString('utf8')),
-        pid: process.pid,
-        manifestPath,
-        description: manifest.description,
-        extensionId: process.argv[3]
-      }),
-      'utf8'
+    const message = JSON.parse(messageBytes.toString('utf8'))
+    if (typeof message?.stderr === 'string') process.stderr.write(message.stderr)
+    const response = {
+      message,
+      pid: process.pid,
+      manifestPath,
+      description: manifest.description,
+      extensionId: process.argv[3]
+    }
+    responseQueue = responseQueue.then(() =>
+      writeResponse(response, message?.partialFrame === true)
     )
-    const length = Buffer.alloc(4)
-    length.writeUInt32LE(response.length)
-    process.stdout.write(Buffer.concat([length, response]))
   }
 })

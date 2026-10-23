@@ -2,6 +2,7 @@ import type { BrowserContext, Page, TestInfo, TestType, WorkerInfo } from '@play
 import type { FirefoxRDP } from '@openpolyfill/firefox-rdp'
 import { bindFirefoxExtensionPage, launchFirefoxExtension } from './launch.js'
 import type { FirefoxExtension, FirefoxHarnessConfig, InternalFirefoxContext } from './types.js'
+import type { NativeMessagingObserver } from './native-messaging-observer.js'
 
 export interface FirefoxFixtures {
   context: InternalFirefoxContext
@@ -10,6 +11,7 @@ export interface FirefoxFixtures {
   chromePages: () => Promise<Page[]>
   extension: FirefoxExtension
   rdp: FirefoxRDP
+  nativeMessaging: NativeMessagingObserver
 }
 const chromeTargetIdentityKey = '__openpolyfillFirefoxUiTarget'
 
@@ -141,6 +143,14 @@ export function createFirefoxFixtures<
       if (!harness) throw new Error('Firefox harness context is not initialized')
       await use(harness.rdp)
     },
+    nativeMessaging: async (
+      { context }: { context: InternalFirefoxContext },
+      use: FixtureUse<NativeMessagingObserver>
+    ) => {
+      const observer = context._firefoxHarness?.nativeMessaging
+      if (!observer) throw new Error('Firefox native messaging observer is not initialized')
+      await use(observer)
+    },
     page: async ({ context }: { context: InternalFirefoxContext }, use: FixtureUse<Page>) => {
       await synchronizePostInstallTabs(context, firefoxHarnessConfig.postInstallPages ?? [])
       const blankPages = context.pages().filter((candidate) => candidate.url() === 'about:blank')
@@ -229,6 +239,7 @@ async function launchHarnessContext(
   context._firefoxHarness = {
     rdp: running.rdp,
     extension: running.extension,
+    nativeMessaging: running.nativeMessaging,
     userDataDir: running.userDataDir
   }
   return { context, close: running.close }

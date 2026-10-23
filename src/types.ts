@@ -1,7 +1,7 @@
 import type { BrowserContext, Page } from '@playwright/test'
 import type { FirefoxRDP } from '@openpolyfill/firefox-rdp'
 import type { FirefoxErrorDiagnostics } from './diagnostics.js'
-
+import type { NativeMessagingObserver } from './native-messaging-observer.js'
 export type ActionKind = 'browserAction' | 'pageAction'
 export type UrlMatcher = string | RegExp
 
@@ -43,6 +43,7 @@ export interface FirefoxLaunchResult {
   context: BrowserContext
   rdp: FirefoxRDP
   extension: FirefoxExtension
+  nativeMessaging: NativeMessagingObserver
   userDataDir: string
   rdpPort: number
   close: () => Promise<void>
@@ -101,6 +102,7 @@ export interface InternalFirefoxContext extends BrowserContext {
   _firefoxHarness?: {
     rdp: FirefoxRDP
     extension: FirefoxExtension
+    nativeMessaging: NativeMessagingObserver
     userDataDir: string
   }
 }
