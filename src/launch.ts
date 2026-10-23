@@ -121,9 +121,13 @@ export async function launchFirefoxExtension(
     }
     return result
   } catch (error) {
-    await diagnostics?.close()
     await localMode?.close().catch(() => {})
-    session?.close()
+    if (extension) {
+      await extension.close().catch(() => {})
+    } else {
+      await diagnostics?.close()
+      session?.close()
+    }
     await bounded(context?.close() ?? Promise.resolve(), 10_000, undefined)
     await removeTempDir(userDataDir)
     await releasePort.release()
@@ -166,22 +170,27 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     if (!chrome)
       throw new Error('Firefox RDP did not expose the parent chrome target for extension lookup')
     const evaluation = new RdpEvaluation(this.session.rdp, chrome.console())
-    const baseUrl = await evaluation.evaluate(`(() => {
-      const { ExtensionParent } = ChromeUtils.importESModule('resource://gre/modules/ExtensionParent.sys.mjs')
-      const extension = ExtensionParent.GlobalManager.extensionMap.get(${JSON.stringify(this.id)})
-      if (!extension) throw new Error('Firefox extension is not registered')
-      return extension.baseURI.spec
-    })()`)
-    if (typeof baseUrl !== 'string' || !baseUrl.startsWith('moz-extension://'))
-      throw new Error('Firefox extension did not expose a moz-extension base URL')
-    this.extensionBaseUrl = baseUrl
-    return baseUrl
+    try {
+      const baseUrl = await evaluation.evaluate(`(() => {
+        const { ExtensionParent } = ChromeUtils.importESModule('resource://gre/modules/ExtensionParent.sys.mjs')
+        const extension = ExtensionParent.GlobalManager.extensionMap.get(${JSON.stringify(this.id)})
+        if (!extension) throw new Error('Firefox extension is not registered')
+        return extension.baseURI.spec
+      })()`)
+      if (typeof baseUrl !== 'string' || !baseUrl.startsWith('moz-extension://'))
+        throw new Error('Firefox extension did not expose a moz-extension base URL')
+      this.extensionBaseUrl = baseUrl
+      return baseUrl
+    } finally {
+      evaluation.dispose()
+    }
   }
   private async waitForExtensionPage(
-    url: string,
+    kind: 'extension-popup' | 'extension-sidebar',
     timeout: number,
     opener?: Page,
-    exactUrl = false
+    targetId?: string,
+    includeExisting = false
   ): Promise<Page> {
     let promise: Promise<Page>
     let resolve!: (page: Page | PromiseLike<Page>) => void
@@ -197,11 +206,14 @@ class FirefoxExtensionHandle implements FirefoxExtension {
         reject = rejectPromise
       })
     }
+    const existingPages = new Set(this.browserContext.pages())
     const pendingPages = new Map<Page, (frame: Frame) => void>()
+    const checkingPages = new Set<Page>()
     let settled = false
     let timeoutId: ReturnType<typeof setTimeout> | undefined
     const cleanup = () => {
       clearTimeout(timeoutId)
+      clearInterval(pollId)
       this.browserContext.off('page', onPage)
       this.browserContext.off('close', onContextClose)
       for (const [page, listener] of pendingPages) page.off('framenavigated', listener)
@@ -220,15 +232,32 @@ class FirefoxExtensionHandle implements FirefoxExtension {
       reject(new Error('Browser context closed while waiting for extension page'))
     }
     const matchPage = async (page: Page) => {
-      if (settled || (exactUrl ? page.url() !== url : !page.url().startsWith(url))) return
-      if (opener) {
-        try {
-          if ((await page.opener()) !== opener) return
-        } catch {
-          return
+      if (settled || (!includeExisting && existingPages.has(page)) || checkingPages.has(page))
+        return
+      checkingPages.add(page)
+      try {
+        const identity = await page
+          .evaluate(() => {
+            const value = (
+              window as unknown as {
+                __openpolyfillFirefoxUiTarget?: { targetId?: string; kind?: string }
+              }
+            ).__openpolyfillFirefoxUiTarget
+            return value && typeof value === 'object' ? value : null
+          })
+          .catch(() => null)
+        if (identity?.kind !== kind || (targetId && identity.targetId !== targetId)) return
+        if (opener) {
+          try {
+            if ((await page.opener()) !== opener) return
+          } catch {
+            return
+          }
         }
+        finish(page)
+      } finally {
+        checkingPages.delete(page)
       }
-      finish(page)
     }
     const onPage = (page: Page) => {
       if (settled || pendingPages.has(page)) return
@@ -248,8 +277,14 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     }
     this.browserContext.on('page', onPage)
     this.browserContext.on('close', onContextClose)
-    if (exactUrl) {
-      for (const page of this.browserContext.pages()) onPage(page)
+    const pollId = setInterval(() => {
+      for (const page of this.browserContext.pages()) {
+        onPage(page)
+        void matchPage(page)
+      }
+    }, 50)
+    if (includeExisting) {
+      for (const page of existingPages) onPage(page)
     }
     return promise
   }
@@ -265,7 +300,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     const popup =
       options.waitForPopup === false
         ? undefined
-        : this.waitForExtensionPage(await this.getExtensionBaseUrl(), 15_000)
+        : this.waitForExtensionPage('extension-popup', 15_000)
     popup?.catch(() => undefined)
     await page.bringToFront()
     const chrome = this.session.chromeTarget
@@ -274,27 +309,31 @@ class FirefoxExtensionHandle implements FirefoxExtension {
         'Firefox RDP did not expose the parent chrome target for extension action activation'
       )
     const chromeEvaluation = new RdpEvaluation(this.session.rdp, chrome.console())
-    if (kind === 'pageAction') {
-      await chromeEvaluation.evaluate(`(async () => {
-        const action = PageActions.actions.find(action => action.extensionID === ${JSON.stringify(this.id)})
-        if (!action) throw new Error('Firefox pageAction is not registered in the chrome action list')
-        let node
-        for (let attempt = 0; attempt < 200 && !node; attempt++) {
-          node = document.getElementById('pageAction-urlbar-' + action.id)
-          if (!node) await new Promise(resolve => setTimeout(resolve, 25))
-        }
-        if (!node) throw new Error('Firefox pageAction has no active-tab URL-bar control')
-        BrowserPageActions.doCommandForAction(action, { button: 0, modifiers: [], target: node }, node)
-      })()`)
-    } else {
-      await chromeEvaluation.evaluate(`(async () => {
-        const { ExtensionParent } = ChromeUtils.importESModule('resource://gre/modules/ExtensionParent.sys.mjs')
-        const extension = ExtensionParent.GlobalManager.extensionMap.get(${JSON.stringify(this.id)})
-        if (!extension) throw new Error('Firefox extension is not registered')
-        const action = ExtensionParent.apiManager.global.browserActionFor?.(extension)
-        if (!action) throw new Error('Firefox browserAction is not registered')
-        action.triggerAction(window)
-      })()`)
+    try {
+      if (kind === 'pageAction') {
+        await chromeEvaluation.evaluate(`(async () => {
+          const action = PageActions.actions.find(action => action.extensionID === ${JSON.stringify(this.id)})
+          if (!action) throw new Error('Firefox pageAction is not registered in the chrome action list')
+          let node
+          for (let attempt = 0; attempt < 200 && !node; attempt++) {
+            node = document.getElementById('pageAction-urlbar-' + action.id)
+            if (!node) await new Promise(resolve => setTimeout(resolve, 25))
+          }
+          if (!node) throw new Error('Firefox pageAction has no active-tab URL-bar control')
+          BrowserPageActions.doCommandForAction(action, { button: 0, modifiers: [], target: node }, node)
+        })()`)
+      } else {
+        await chromeEvaluation.evaluate(`(async () => {
+          const { ExtensionParent } = ChromeUtils.importESModule('resource://gre/modules/ExtensionParent.sys.mjs')
+          const extension = ExtensionParent.GlobalManager.extensionMap.get(${JSON.stringify(this.id)})
+          if (!extension) throw new Error('Firefox extension is not registered')
+          const action = ExtensionParent.apiManager.global.browserActionFor?.(extension)
+          if (!action) throw new Error('Firefox browserAction is not registered')
+          action.triggerAction(window)
+        })()`)
+      }
+    } finally {
+      chromeEvaluation.dispose()
     }
     if (popup) return popup
   }
@@ -309,53 +348,68 @@ class FirefoxExtensionHandle implements FirefoxExtension {
         'Firefox RDP did not expose the parent chrome target for extension sidebar activation'
       )
     const chromeEvaluation = new RdpEvaluation(this.session.rdp, chrome.console())
-    const sidebarUrl = await chromeEvaluation.evaluate<string>(`(async () => {
-      const extensionId = ${JSON.stringify(this.id)}
-      const baseUrl = ${JSON.stringify(baseUrl)}
-      const controller = window.SidebarController
-      if (!controller) throw new Error('Firefox SidebarController is unavailable')
-      let entry
-      for (let attempt = 0; attempt < 200 && !entry; attempt++) {
-        if (controller._inited)
-          entry = [...controller.sidebars.entries()].find(([, sidebar]) => sidebar.extensionId === extensionId)
-        if (!entry) await new Promise(resolve => setTimeout(resolve, 25))
-      }
-      if (!entry) throw new Error('Firefox extension sidebar is not registered')
-      const [commandId] = entry
-      if (!(await controller.show(commandId)))
-        throw new Error('Firefox could not activate the extension sidebar')
-      let browser
-      for (let attempt = 0; attempt < 600; attempt++) {
-        browser = controller.browser.contentDocument?.getElementById('webext-panels-browser')
-        if (browser?.currentURI?.spec.startsWith(baseUrl)) break
-        await new Promise(resolve => setTimeout(resolve, 25))
-      }
-      if (!browser?.browsingContext || !browser.currentURI.spec.startsWith(baseUrl))
-        throw new Error('Firefox extension sidebar inner browser did not load')
-      const { TargetRegistry } = ChromeUtils.importESModule('chrome://juggler/content/TargetRegistry.js')
-      const registry = TargetRegistry.instance()
-      if (!registry || typeof registry.registerExtensionSidebar !== 'function')
-        throw new Error('Firefox Juggler sidebar target support is unavailable')
-      registry.registerExtensionSidebar(window, extensionId)
-      return browser.currentURI.spec
-    })()`)
-    if (!sidebarUrl.startsWith(baseUrl))
-      throw new Error('Firefox returned an unexpected URL for the extension sidebar')
-    const sidebarPage = await this.waitForExtensionPage(sidebarUrl, 15_000, page, true)
+    let sidebarTargetId: string
+    try {
+      sidebarTargetId = await chromeEvaluation.evaluate<string>(`(async () => {
+        const extensionId = ${JSON.stringify(this.id)}
+        const baseUrl = ${JSON.stringify(baseUrl)}
+        const controller = window.SidebarController
+        if (!controller) throw new Error('Firefox SidebarController is unavailable')
+        let entry
+        for (let attempt = 0; attempt < 200 && !entry; attempt++) {
+          if (controller._inited)
+            entry = [...controller.sidebars.entries()].find(([, sidebar]) => sidebar.extensionId === extensionId)
+          if (!entry) await new Promise(resolve => setTimeout(resolve, 25))
+        }
+        if (!entry) throw new Error('Firefox extension sidebar is not registered')
+        const [commandId] = entry
+        if (!(await controller.show(commandId)))
+          throw new Error('Firefox could not activate the extension sidebar')
+        let browser
+        for (let attempt = 0; attempt < 600; attempt++) {
+          browser = controller.browser.contentDocument?.getElementById('webext-panels-browser')
+          if (browser?.currentURI?.spec.startsWith(baseUrl)) break
+          await new Promise(resolve => setTimeout(resolve, 25))
+        }
+        if (!browser?.browsingContext || !browser.currentURI.spec.startsWith(baseUrl))
+          throw new Error('Firefox extension sidebar inner browser did not load')
+        const { TargetRegistry } = ChromeUtils.importESModule('chrome://juggler/content/TargetRegistry.js')
+        const registry = TargetRegistry.instance()
+        if (!registry || typeof registry.registerExtensionSidebar !== 'function')
+          throw new Error('Firefox Juggler sidebar target support is unavailable')
+        const targetId = registry.registerExtensionSidebar(window, extensionId)
+        if (!targetId) throw new Error('Firefox Juggler did not register the extension sidebar target')
+        return targetId
+      })()`)
+    } finally {
+      chromeEvaluation.dispose()
+    }
+    if (!sidebarTargetId)
+      throw new Error('Firefox Juggler returned no target identity for the extension sidebar')
+    const sidebarPage = await this.waitForExtensionPage(
+      'extension-sidebar',
+      15_000,
+      page,
+      sidebarTargetId,
+      true
+    )
     await sidebarPage.waitForLoadState('load')
     return sidebarPage
   }
 
   async waitForPopup(options: { timeout?: number } = {}): Promise<Page> {
     if (this.closed) throw new Error('Extension harness is closed')
-    const baseUrl = await this.getExtensionBaseUrl()
-    return this.waitForExtensionPage(baseUrl, options.timeout ?? 15_000)
+    return this.waitForExtensionPage('extension-popup', options.timeout ?? 15_000)
   }
 
   async close(): Promise<void> {
     this.closed = true
-    await this.diagnostics.close()
-    this.session.close()
+    try {
+      await this.diagnostics.close()
+    } finally {
+      this.background?.dispose()
+      this.session.close()
+    }
   }
 }
 

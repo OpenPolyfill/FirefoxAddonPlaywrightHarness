@@ -75,3 +75,39 @@ test('waitForPopup returns the popup instead of an already-open sidebar', async 
   expect(sidebar.isClosed()).toBe(false)
   expect(page.context().pages()).toContain(sidebar)
 })
+
+test('closes the sidebar from browser chrome and drives the bookmarks sidebar Page', async ({
+  context,
+  page,
+  extension,
+  chromePage
+}) => {
+  const sidebar = await extension.activateSidebar(page)
+  const sidebarClosed = sidebar.waitForEvent('close')
+  await chromePage.locator('#sidebar-button').click()
+  await sidebarClosed
+
+  const bookmarksOpened = context.waitForEvent('page')
+  await chromePage.evaluate(() =>
+    (
+      window as unknown as { SidebarController: { show(id: string): Promise<boolean> } }
+    ).SidebarController.show('viewBookmarksSidebar')
+  )
+  const bookmarks = await bookmarksOpened
+  await expect
+    .poll(() => bookmarks.url())
+    .toBe('chrome://browser/content/places/bookmarksSidebar.xhtml')
+  const search = bookmarks.getByRole('searchbox')
+  await search.fill('Harness')
+  await expect(search).toHaveValue('Harness')
+
+  const bookmarksClosed = bookmarks.waitForEvent('close')
+  await bookmarks.locator('#sidebar-panel-close').click()
+  await bookmarksClosed
+  expect(
+    await chromePage.evaluate(
+      () =>
+        (window as unknown as { SidebarController: { isOpen: boolean } }).SidebarController.isOpen
+    )
+  ).toBe(false)
+})

@@ -21,19 +21,361 @@ diff --git a/omni.ja/modules/addons/AddonSettings.sys.mjs b/omni.ja/modules/addo
 diff --git a/omni.ja/chrome/juggler/content/content/JugglerFrameChild.jsm b/omni.ja/chrome/juggler/content/content/JugglerFrameChild.jsm
 --- a/omni.ja/chrome/juggler/content/content/JugglerFrameChild.jsm
 +++ b/omni.ja/chrome/juggler/content/content/JugglerFrameChild.jsm
-@@ -46,7 +46,7 @@
+@@ -10,6 +10,37 @@
+ 
+ const topBrowingContextToAgents = new Map();
+ 
++function targetRoot(context) {
++  while (context.parent && context.embedderElement?.localName !== 'browser')
++    context = context.parent;
++  return context;
++}
++
++function bindAgents(browsingContext, actor) {
++  let agents = topBrowingContextToAgents.get(browsingContext);
++  if (!agents) {
++    agents = initialize(browsingContext, actor.docShell);
++    topBrowingContextToAgents.set(browsingContext, agents);
++  }
++  agents.channel.bindToActor(actor);
++  agents.actor = actor;
++}
++
++// An in-process browser, like the sidebar's, can outlive the target that owned its
++// document. The agents here would carry that target's state and queued events over to
++// the next one; fresh agents report the frame tree again, like for a new browser.
++export function resetAgents(browsingContext) {
++  const agents = topBrowingContextToAgents.get(browsingContext);
++  if (!agents)
++    return;
++  topBrowingContextToAgents.delete(browsingContext);
++  agents.channel.resetTransport();
++  agents.pageAgent.dispose();
++  agents.frameTree.dispose();
++  if (agents.actor && !browsingContext.isDiscarded)
++    bindAgents(browsingContext, agents.actor);
++}
++
+ export class JugglerFrameChild extends JSWindowActorChild {
+   constructor() {
+     super();
+@@ -36,7 +67,7 @@
+   }
+ 
+   _agents() {
+-    return topBrowingContextToAgents.get(this.browsingContext.top);
++    return topBrowingContextToAgents.get(targetRoot(this.browsingContext));
+   }
+ 
+   actorCreated() {
+@@ -46,26 +77,17 @@
        this._agents()?.pageAgent.onWindowEvent(event);
      }));
  
 -    if (this.document.documentURI.startsWith('moz-extension://'))
-+    if (this.document.documentURI.startsWith('moz-extension-DISABLED://'))
+-      return;
+-
+     // Child frame events will be forwarded to related top-level agents.
+-    if (this.browsingContext.parent)
++    if (targetRoot(this.browsingContext) !== this.browsingContext)
        return;
  
-     // Child frame events will be forwarded to related top-level agents.
+-    let agents = topBrowingContextToAgents.get(this.browsingContext);
+-    if (!agents) {
+-      agents = initialize(this.browsingContext, this.docShell);
+-      topBrowingContextToAgents.set(this.browsingContext, agents);
+-    }
+-    agents.channel.bindToActor(this);
+-    agents.actor = this;
++    bindAgents(this.browsingContext, this);
+   }
+ 
+   didDestroy() {
+     helper.removeListeners(this._eventListeners);
+ 
+-    if (this.browsingContext.parent)
++    if (targetRoot(this.browsingContext) !== this.browsingContext)
+       return;
+ 
+     const agents = topBrowingContextToAgents.get(this.browsingContext);
 diff --git a/omni.ja/chrome/juggler/content/content/FrameTree.js b/omni.ja/chrome/juggler/content/content/FrameTree.js
 --- a/omni.ja/chrome/juggler/content/content/FrameTree.js
 +++ b/omni.ja/chrome/juggler/content/content/FrameTree.js
-@@ -510,6 +510,30 @@
+@@ -11,11 +11,118 @@
+ 
+ const helper = new Helper();
+ 
++const XUL_NS = 'http://www.mozilla.org/keymaster/gatekeeper/there.is.only.xul';
++const HTML_NS = 'http://www.w3.org/1999/xhtml';
++
++// Document hit testing (elementFromPoint/elementsFromPoint) does not see XUL popups:
++// they are painted into their own widgets, while input targeting still reaches them.
++// Playwright's actionability checks rely on elementsFromPoint, so the utility world of
++// chrome documents hit-tests open popups from their layout boxes.
++function collectOpenPopups(root, popups) {
++  for (const element of root.querySelectorAll('*')) {
++    if (element.namespaceURI === XUL_NS &&
++        (element.localName === 'panel' || element.localName === 'menupopup') &&
++        (element.state === 'open' || element.state === 'showing'))
++      popups.push(element);
++    const shadowRoot = element.openOrClosedShadowRoot;
++    if (shadowRoot)
++      collectOpenPopups(shadowRoot, popups);
++  }
++  return popups;
++}
++
++function composedParent(node) {
++  return node.parentElement ?? node.getRootNode().host ?? null;
++}
++
++function isComposedAncestor(ancestor, node) {
++  for (let current = composedParent(node); current; current = composedParent(current)) {
++    if (current === ancestor)
++      return true;
++  }
++  return false;
++}
++
++function rectsContain(element, x, y) {
++  for (const rect of element.getClientRects()) {
++    if (x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom)
++      return true;
++  }
++  return false;
++}
++
++function renderedChildren(element) {
++  const children = [];
++  for (const child of (element.openOrClosedShadowRoot ?? element).children) {
++    const assigned = child.localName === 'slot' && child.namespaceURI === HTML_NS
++      ? child.assignedElements({ flatten: true })
++      : [];
++    children.push(...(assigned.length ? assigned : [child]));
++  }
++  return children;
++}
++
++// Later rendered siblings paint above earlier ones; positioned z-order is not modeled.
++function hitTestElement(window, element, x, y) {
++  const style = window.getComputedStyle(element);
++  if (!style || style.display === 'none')
++    return null;
++  const contains = rectsContain(element, x, y);
++  if (!contains && (style.overflowX !== 'visible' || style.overflowY !== 'visible'))
++    return null;
++  const children = renderedChildren(element);
++  for (let index = children.length - 1; index >= 0; index--) {
++    const hit = hitTestElement(window, children[index], x, y);
++    if (hit)
++      return hit;
++  }
++  return contains && style.pointerEvents !== 'none' && style.visibility === 'visible' ? element : null;
++}
++
++function hitTestOpenPopups(window, x, y) {
++  let topmost = null;
++  for (const popup of collectOpenPopups(window.document, [])) {
++    if (!rectsContain(popup, x, y))
++      continue;
++    // Nested popups (submenus) are shown above the popups containing them.
++    if (!topmost || !isComposedAncestor(popup, topmost))
++      topmost = popup;
++  }
++  return topmost && (hitTestElement(window, topmost, x, y) ?? topmost);
++}
++
++function retarget(node, root) {
++  for (;;) {
++    const nodeRoot = node.getRootNode();
++    if (nodeRoot === root || !nodeRoot.host)
++      return node;
++    for (let scope = root; scope; scope = scope.host?.getRootNode()) {
++      if (scope === nodeRoot)
++        return node;
++    }
++    node = nodeRoot.host;
++  }
++}
++
++function elementsFromPopupPoint(window, root, x, y) {
++  const hit = hitTestOpenPopups(window, x, y);
++  if (!hit)
++    return null;
++  const elements = [];
++  for (let node = hit; node; node = composedParent(node)) {
++    const element = retarget(node, root);
++    if (elements[elements.length - 1] !== element)
++      elements.push(element);
++  }
++  return elements;
++}
++
+ export class FrameTree {
+-  constructor(rootBrowsingContext) {
++  constructor(rootBrowsingContext, rootDocShell = null) {
+     helper.decorateAsEventEmitter(this);
+ 
+     this._rootBrowsingContext = rootBrowsingContext;
++    this._rootDocShell = rootDocShell;
+ 
+     this._browsingContextGroup = rootBrowsingContext.group;
+     if (!this._browsingContextGroup.__jugglerFrameTrees)
+@@ -35,8 +142,10 @@
+     for (const browsingContext of helper.collectAllBrowsingContexts(rootBrowsingContext))
+       this._createFrame(browsingContext);
+     this._mainFrame = this.frameForBrowsingContext(rootBrowsingContext);
+-
+-    const webProgress = rootBrowsingContext.docShell.QueryInterface(Ci.nsIInterfaceRequestor)
++    const webProgressDocShell = rootBrowsingContext.docShell?.domWindow
++      ? rootBrowsingContext.docShell
++      : rootDocShell || rootBrowsingContext.docShell;
++    const webProgress = webProgressDocShell.QueryInterface(Ci.nsIInterfaceRequestor)
+                                 .getInterface(Ci.nsIWebProgress);
+     this.QueryInterface = ChromeUtils.generateQI([
+       Ci.nsIWebProgressListener,
+@@ -65,6 +174,7 @@
+         this.emit(FrameTree.Events.NavigationStarted, frame);
+       }, 'juggler-navigation-started-renderer'),
+       helper.addObserver(this._onDOMWindowCreated.bind(this), 'content-document-global-created'),
++      helper.addObserver(this._onDOMWindowCreated.bind(this), 'chrome-document-global-created'),
+       helper.addObserver(this._onDOMWindowCreated.bind(this), 'juggler-dom-window-reused'),
+       helper.addObserver((browsingContext, topic, why) => {
+         this._onBrowsingContextAttached(browsingContext);
+@@ -86,6 +196,40 @@
+     return this._runtime;
+   }
+ 
++  setUiTargetMetadata(metadata) {
++    this._uiTargetMetadata = metadata;
++    const window = this.mainFrame()?.domWindow();
++    if (window) {
++      const global = Cu.waiveXrays(window);
++      global.__openpolyfillFirefoxUiTarget = Cu.cloneInto(metadata, global);
++    }
++    // Chrome documents are loaded before their target registers; this is a no-op for others.
++    if (metadata?.kind?.startsWith('chrome-') || metadata?.kind === 'embedded-browser')
++      Promise.resolve().then(() => this._markChromeWindowReady(window?.document));
++  }
++
++  _markChromeWindowReady(document) {
++    if (!document?.defaultView?.isChromeWindow ||
++        !['interactive', 'complete'].includes(document.readyState) ||
++        this._readyChromeDocument === document)
++      return false;
++    const frame = this.frameForDocShell(document.defaultView.docShell);
++    if (frame !== this._mainFrame)
++      return false;
++    this._readyChromeDocument = document;
++    frame._docShell = document.defaultView.docShell;
++    if (!frame.mainExecutionContext()) {
++      // An already committed document only lacks execution contexts. Committing it
++      // again makes Playwright treat it as a new document and drop its child frames.
++      if (frame._url && frame._url === document.location?.href)
++        frame._initializeExecutionContexts();
++      else
++        frame._onGlobalObjectCleared();
++    }
++    this.forcePageReady();
++    return true;
++  }
++
+   setInitScripts(scripts) {
+     for (const world of this._isolatedWorlds.values())
+       world._scriptsToEvaluateOnNewDocument = [];
+@@ -125,6 +269,12 @@
+     const frame = this.frameForDocShell(window.docShell);
+     if (!frame)
+       return;
++    // A <browser> may attach its browsing context before its embedder is set; once
++    // known, its documents belong to that browser's own target, not to this tree.
++    if (!this._ownsBrowsingContext(frame._browsingContext)) {
++      this._detachFrame(frame);
++      return;
++    }
+     frame._onGlobalObjectCleared();
+   }
+ 
+@@ -239,6 +389,8 @@
+   }
+ 
+   onWindowEvent(event) {
++    if (event.type === 'DOMContentLoaded' && this._markChromeWindowReady(event.target))
++      return;
+     if (event.type !== 'DOMDocElementInserted' || !event.target.documentGlobal)
+       return;
+ 
+@@ -251,10 +403,14 @@
+     if (frame._pendingNavigationId) {
+       docShell.QueryInterface(Ci.nsIWebNavigation);
+       this._frameNavigationCommitted(frame, docShell.currentURI.spec);
++    } else if (!frame.mainExecutionContext()) {
++      // Agents created mid-load, e.g. after the page moved to another process, missed
++      // both this document's global creation and its navigation start.
++      frame._onGlobalObjectCleared();
+     }
+     if (frame === this._mainFrame) {
+       helper.removeListeners(this._dragEventListeners);
+-      const chromeEventHandler = docShell.chromeEventHandler;
++      const chromeEventHandler = docShell.chromeEventHandler || docShell.domWindow;
+       const options = {
+         mozSystemGroup: true,
+         capture: true,
+@@ -319,9 +475,6 @@
+   }
+ 
+   _onBrowsingContextAttached(browsingContext) {
+-    // If this browsing context doesn't belong to our frame tree - do nothing.
+-    if (browsingContext.top !== this._rootBrowsingContext)
+-      return;
+     this._createFrame(browsingContext);
+   }
+ 
+@@ -331,7 +484,22 @@
+       this._detachFrame(frame);
+   }
+ 
++  _ownsBrowsingContext(context) {
++    for (let current = context; current; current = current.parent) {
++      if (current === this._rootBrowsingContext)
++        return true;
++      if (current.embedderElement?.localName === 'browser')
++        return false;
++    }
++    return false;
++  }
++
+   _createFrame(browsingContext) {
++    if (!this._ownsBrowsingContext(browsingContext))
++      return;
++    const existing = this.frameForBrowsingContext(browsingContext);
++    if (existing)
++      return existing;
+     const parentFrame = this.frameForBrowsingContext(browsingContext.parent);
+     if (!parentFrame && this._mainFrame) {
+       dump(`WARNING: found docShell with the same root, but no parent!\n`);
+@@ -398,6 +566,9 @@
+     this._frameTree = frameTree;
+     this._runtime = runtime;
+     this._browsingContext = browsingContext;
++    this._docShell = browsingContext.docShell;
++    if (!this._docShell?.domWindow && browsingContext === frameTree._rootBrowsingContext)
++      this._docShell = frameTree._rootDocShell || this._docShell;
+     this._children = new Set();
+     this._frameId = helper.browsingContextToFrameId(browsingContext);
+     this._parentFrame = null;
+@@ -503,13 +674,105 @@
+   }
+ 
+   _createIsolatedContext(name) {
+-    const principal = [this.domWindow()]; // extended principal
++    const window = this.domWindow();
++    const principal = window.document.nodePrincipal.isSystemPrincipal
++      ? window.document.nodePrincipal
++      : [window]; // extended principal for content documents
+     const sandbox = Cu.Sandbox(principal, {
+       sandboxPrototype: this.domWindow(),
+       wantComponents: false,
        wantExportHelpers: false,
        wantXrays: true,
      });
@@ -60,111 +402,187 @@ diff --git a/omni.ja/chrome/juggler/content/content/FrameTree.js b/omni.ja/chrom
 +        '})()',
 +        sandbox
 +      );
++      if (window.document.nodePrincipal.isSystemPrincipal) {
++        const nativeCheckVisibility = window.Element.prototype.checkVisibility;
++        Cu.exportFunction((element, options) => {
++          // XUL popup widgets retain their layout box after hidePopup().
++          // Check their host state before Playwright's normal geometry checks.
++          for (let node = element; node; node = node.parentElement || node.getRootNode()?.host) {
++            if (node.namespaceURI === XUL_NS &&
++                ['panel', 'menupopup', 'tooltip'].includes(node.localName) &&
++                !['open', 'showing'].includes(node.state))
++              return false;
++          }
++          return nativeCheckVisibility.call(element, options);
++        }, sandbox, { defineAs: '__openpolyfillUiVisibility__' });
++        Cu.evalInSandbox(`(() => {
++          const check = globalThis.__openpolyfillUiVisibility__;
++          Object.defineProperty(Element.prototype, 'checkVisibility', {
++            configurable: true,
++            value(options) { return check(this, options); },
++          });
++          delete globalThis.__openpolyfillUiVisibility__;
++        })()`, sandbox);
++        Cu.exportFunction((root, x, y) => {
++          const elements = elementsFromPopupPoint(window, root, x, y);
++          return elements && Cu.cloneInto(elements, sandbox, { wrapReflectors: true });
++        }, sandbox, { defineAs: '__openpolyfillUiHitTest__' });
++        Cu.evalInSandbox(`(() => {
++          const hitTest = globalThis.__openpolyfillUiHitTest__;
++          for (const proto of [Document.prototype, ShadowRoot.prototype]) {
++            const elementsFromPoint = proto.elementsFromPoint;
++            const elementFromPoint = proto.elementFromPoint;
++            Object.defineProperty(proto, 'elementsFromPoint', {
++              configurable: true,
++              value(x, y) { return hitTest(this, x, y) ?? elementsFromPoint.call(this, x, y); },
++            });
++            Object.defineProperty(proto, 'elementFromPoint', {
++              configurable: true,
++              value(x, y) {
++                const elements = hitTest(this, x, y);
++                return elements ? elements[0] ?? null : elementFromPoint.call(this, x, y);
++              },
++            });
++          }
++          delete globalThis.__openpolyfillUiHitTest__;
++        })()`, sandbox);
++        // HTML elements in XUL and XHTML documents report case-preserved, possibly
++        // prefixed names ("html:input"); Playwright identifies form controls and roles
++        // by the names an HTML document reports.
++        Cu.evalInSandbox(`(() => {
++          const HTML_NS = ${JSON.stringify(HTML_NS)};
++          const nodeName = Object.getOwnPropertyDescriptor(Node.prototype, 'nodeName').get;
++          const tagName = Object.getOwnPropertyDescriptor(Element.prototype, 'tagName').get;
++          Object.defineProperty(Node.prototype, 'nodeName', {
++            configurable: true,
++            get() {
++              return this.nodeType === Node.ELEMENT_NODE && this.namespaceURI === HTML_NS
++                ? this.localName.toUpperCase()
++                : nodeName.call(this);
++            },
++          });
++          Object.defineProperty(Element.prototype, 'tagName', {
++            configurable: true,
++            get() { return this.namespaceURI === HTML_NS ? this.localName.toUpperCase() : tagName.call(this); },
++          });
++        })()`, sandbox);
++      }
 +    }
      const world = this._runtime.createExecutionContext(this.domWindow(), sandbox, {
        frameId: this.id(),
        name,
+@@ -542,11 +805,15 @@
+   }
+ 
+   _onGlobalObjectCleared() {
+-    const webSocketService = this._frameTree._webSocketEventService;
+-    if (this._webSocketListenerInnerWindowId && webSocketService.hasListenerFor(this._webSocketListenerInnerWindowId))
+-      webSocketService.removeListener(this._webSocketListenerInnerWindowId, this._webSocketListener);
+-    this._webSocketListenerInnerWindowId = this.domWindow().windowGlobalChild.innerWindowId;
+-    webSocketService.addListener(this._webSocketListenerInnerWindowId, this._webSocketListener);
++    const domWindow = this.domWindow();
++    const innerWindowId = domWindow?.windowGlobalChild?.innerWindowId;
++    if (innerWindowId) {
++      const webSocketService = this._frameTree._webSocketEventService;
++      if (this._webSocketListenerInnerWindowId && webSocketService.hasListenerFor(this._webSocketListenerInnerWindowId))
++        webSocketService.removeListener(this._webSocketListenerInnerWindowId, this._webSocketListener);
++      this._webSocketListenerInnerWindowId = innerWindowId;
++      webSocketService.addListener(this._webSocketListenerInnerWindowId, this._webSocketListener);
++    }
+ 
+     for (const context of this._worldNameToContext.values())
+       this._runtime.destroyExecutionContext(context);
+@@ -567,6 +834,8 @@
+     // (document.open/write, initial about:blank) - only initialize once.
+     if (this._worldNameToContext.has(''))
+       return;
++    if (this === this._frameTree.mainFrame() && this._frameTree._uiTargetMetadata)
++      this._frameTree.setUiTargetMetadata(this._frameTree._uiTargetMetadata);
+     this._worldNameToContext.set('', this._runtime.createExecutionContext(this.domWindow(), this.domWindow(), {
+       frameId: this._frameId,
+       name: '',
+@@ -609,7 +878,8 @@
+   }
+ 
+   docShell() {
+-    return this._browsingContext.docShell;
++    return this._browsingContext.docShell?.domWindow ? this._browsingContext.docShell :
++      (this._browsingContext === this._frameTree._rootBrowsingContext ? this._docShell : this._browsingContext.docShell);
+   }
+ 
+   domWindow() {
 diff --git a/omni.ja/chrome/juggler/content/TargetRegistry.js b/omni.ja/chrome/juggler/content/TargetRegistry.js
 --- a/omni.ja/chrome/juggler/content/TargetRegistry.js
 +++ b/omni.ja/chrome/juggler/content/TargetRegistry.js
-@@ -180,6 +180,96 @@
+@@ -122,6 +122,11 @@
+     this._browserIdToTarget = new Map();
+ 
+     this._browserIdToActor = new Map();
++    this._browsingContextToTarget = new Map();
++    this._browsingContextToActor = new Map();
++    this._chromeWindowTargets = new Map();
++    this._uiDocuments = new Map();
++    this._uiPrimaryWindow = null;
+ 
+     this._proxiesWithClashingAuthCacheKeys = new Set();
+     this._browserProxy = null;
+@@ -165,10 +170,9 @@
+       }
+       if (!browserContext)
+         throw new Error(`Internal error: cannot find context for userContextId=${userContextId}`);
+-      const target = new PageTarget(this, window, tab, browserContext, openerTarget);
+-      target.updateOverridesForBrowsingContext(tab.linkedBrowser.browsingContext);
+-      if (!hasExplicitSize)
+-        target.updateViewportSize();
++      this.registerTarget(window, tab.linkedBrowser, {
++        kind: 'tab', tab, browserContext, opener: openerTarget, updateViewport: !hasExplicitSize,
++      });
      };
  
+     const onTabCloseListener = event => {
+@@ -181,6 +185,41 @@
+ 
      const domWindowTabListeners = new Map();
-+
-+    const popupTargetsByWindow = new Map();
-+
+ 
 +    this.registerExtensionSidebar = (ownerWindow, extensionId) => {
 +      const controller = ownerWindow.SidebarController;
-+      if (!controller || !controller._box)
-+        throw new Error('Firefox SidebarController is unavailable');
-+      const entry = [...controller.sidebars.entries()].find(([, sidebar]) => sidebar.extensionId === extensionId);
-+      if (!entry)
-+        throw new Error('Firefox extension sidebar is not registered');
-+      const [commandID] = entry;
-+      if (!controller.isOpen || controller.currentID !== commandID)
++      const entry = controller && [...controller.sidebars.entries()].find(([, sidebar]) => sidebar.extensionId === extensionId);
++      if (!entry || !controller.isOpen || controller.currentID !== entry[0])
 +        throw new Error('Firefox extension sidebar is not active');
-+      const hostBrowser = controller.browser;
-+      const browser = hostBrowser.contentDocument?.getElementById('webext-panels-browser');
-+      if (!browser || browser.getAttribute('webextension-view-type') !== 'sidebar' || !browser.browsingContext)
++      const browser = controller.browser.contentDocument?.getElementById('webext-panels-browser');
++      if (!browser?.browsingContext || browser.getAttribute('webextension-view-type') !== 'sidebar')
 +        throw new Error('Firefox extension sidebar inner browser is unavailable');
-+      const existing = this._browserToTarget.get(browser);
-+      if (existing) {
-+        if (existing._sidebarExtensionID === extensionId && existing._sidebarCommandID === commandID)
-+          return existing.id();
-+        if (existing._sidebarController)
-+          existing.dispose();
-+        else
-+          throw new Error('Firefox extension sidebar browser already has a Juggler target');
-+      }
-+      const browsingContext = browser.browsingContext;
-+      const opener = this._browserToTarget.get(ownerWindow.gBrowser.selectedBrowser);
-+      const userContextId = browsingContext.originAttributes.userContextId || 0;
-+      const browserContext = opener ? opener.browserContext() : this._userContextIdToBrowserContext.get(userContextId);
-+      if (!browserContext)
-+        throw new Error('Firefox extension sidebar has no Playwright browser context');
-+      const sidebarTab = { linkedBrowser: browser, userContextId };
-+      const target = new PageTarget(this, ownerWindow, sidebarTab, browserContext, opener, null, controller, commandID, extensionId);
-+      target._sidebarOwnerWindow = ownerWindow;
-+      target._sidebarOwnerUnloadListener = () => target.dispose();
-+      ownerWindow.addEventListener('unload', target._sidebarOwnerUnloadListener, { once: true });
-+      target._sidebarHostBrowser = hostBrowser;
-+      const onSidebarChange = () => {
-+        const activeBrowser = hostBrowser.contentDocument?.getElementById('webext-panels-browser');
-+        if (!controller.isOpen || controller.currentID !== commandID || activeBrowser !== browser)
-+          target.dispose();
-+      };
-+      const observer = new ownerWindow.MutationObserver(onSidebarChange);
-+      target._sidebarObserver = observer;
-+      observer.observe(controller._box, { attributes: true, attributeFilter: ['hidden'] });
-+      const sidebarDocument = browser.ownerDocument;
-+      if (sidebarDocument?.documentElement)
-+        observer.observe(sidebarDocument.documentElement, { childList: true, subtree: true });
-+      const onHostLoad = () => onSidebarChange();
-+      target._sidebarHostLoadListener = onHostLoad;
-+      hostBrowser.addEventListener('load', onHostLoad, true);
-+      target.updateOverridesForBrowsingContext(browsingContext);
-+      target.updateViewportSize().catch(error => dump('Sidebar viewport update failed: ' + error + '\n'));
++      const target = this.registerTarget(ownerWindow, browser, {
++        kind: 'extension-sidebar',
++        extensionId,
++        sidebarController: controller,
++        sidebarCommandID: entry[0],
++        parent: this.targetForBrowser(controller.browser) || this._chromeWindowTargets.get(ownerWindow),
++        opener: this.targetForBrowser(ownerWindow.gBrowser.selectedBrowser),
++      });
++      this.observeUiDocument(browser.ownerDocument, target._uiHost.parent);
 +      return target.id();
 +    };
 +    const onExtensionPopupLoaded = (ownerWindow, event) => {
 +      const browser = event.target;
-+      if (!browser || browser.getAttribute('webextension-view-type') !== 'popup' || this._browserToTarget.has(browser))
++      if (browser?.getAttribute('webextension-view-type') !== 'popup')
 +        return;
-+      let panel = browser.parentNode;
-+      while (panel && panel.localName !== 'panel')
-+        panel = panel.parentNode;
++      const panel = browser.closest('panel');
 +      if (!panel || panel.id === 'webextension-remote-preload-panel')
 +        return;
-+      const browsingContext = browser.browsingContext;
-+      if (!browsingContext)
-+        return;
-+      const opener = this._browserToTarget.get(ownerWindow.gBrowser.selectedBrowser);
-+      const userContextId = browsingContext.originAttributes.userContextId || 0;
-+      const browserContext = opener ? opener.browserContext() : this._userContextIdToBrowserContext.get(userContextId);
-+      if (!browserContext)
-+        return;
-+      const popupTab = { linkedBrowser: browser, userContextId };
-+      const target = new PageTarget(this, ownerWindow, popupTab, browserContext, opener, panel);
-+      let targets = popupTargetsByWindow.get(ownerWindow);
-+      if (!targets) {
-+        targets = new Set();
-+        popupTargetsByWindow.set(ownerWindow, targets);
-+      }
-+      targets.add(target);
-+      target.updateOverridesForBrowsingContext(browsingContext);
-+      target.updateViewportSize().catch(error => dump('Popup viewport update failed: ' + error + '\n'));
-+      const onPopupHidden = () => {
-+        popupTargetsByWindow.get(ownerWindow)?.delete(target);
-+        target.dispose();
-+        panel.removeEventListener('popuphidden', onPopupHidden);
-+      };
-+      panel.addEventListener('popuphidden', onPopupHidden);
++      this.registerTarget(ownerWindow, browser, {
++        kind: 'extension-popup',
++        panel,
++        extensionId: browser.getAttribute('extension') || browser.getAttribute('addonId') || undefined,
++        parent: this._chromeWindowTargets.get(ownerWindow),
++        opener: this.targetForBrowser(ownerWindow.gBrowser.selectedBrowser),
++      });
 +    };
- 
++
      const onOpenWindow = async (appWindow) => {
  
-@@ -211,6 +301,7 @@
+       let domWindow;
+@@ -211,6 +250,7 @@
        domWindowTabListeners.set(domWindow, [
          helper.addEventListener(tabContainer, 'TabOpen', event => onTabOpenListener(appWindow, domWindow, event)),
          helper.addEventListener(tabContainer, 'TabClose', onTabCloseListener),
@@ -172,271 +590,1056 @@ diff --git a/omni.ja/chrome/juggler/content/TargetRegistry.js b/omni.ja/chrome/j
        ]);
        for (const tab of domWindow.gBrowser.tabs)
          onTabOpenListener(appWindow, domWindow, { target: tab });
-@@ -226,6 +317,10 @@
+@@ -226,6 +266,8 @@
        const listeners = domWindowTabListeners.get(domWindow) || [];
        domWindowTabListeners.delete(domWindow);
        helper.removeListeners(listeners);
 +
-+      for (const target of popupTargetsByWindow.get(domWindow) || [])
-+        target.dispose();
-+      popupTargetsByWindow.delete(domWindow);
++      this.closeChromeWindow(domWindow);
        for (const tab of domWindow.gBrowser.tabs)
          onTabCloseListener({ target: tab });
      };
-@@ -405,14 +500,18 @@
+@@ -240,23 +282,24 @@
+   }
+ 
+   onActorCreated(actor) {
+-    // Only interested in main frames for now.
+-    if (actor.browsingContext.parent)
++    const context = actor.browsingContext;
++    if (context.parent && context.embedderElement?.localName !== 'browser')
+       return;
+-
+-    const browserId = actor.browsingContext.browserId;
+-    this._browserIdToActor.set(browserId, actor);
+-
+-    const target = this._browserIdToTarget.get(browserId);
++    this._browsingContextToActor.set(context.id, actor);
++    if (!context.parent)
++      this._browserIdToActor.set(context.browserId, actor);
++    const target = this._browsingContextToTarget.get(context.id) ||
++      (context.parent ? this._browserToTarget.get(context.embedderElement) : this._browserIdToTarget.get(context.browserId));
+     target?.setActor(actor);
+   }
+ 
+   onActorDestroyed(actor) {
+-    const browserId = actor.browsingContext.browserId;
+-    const target = this._browserIdToTarget.get(browserId);
+-    target?.removeActor(actor);
+-    if (this._browserIdToActor.get(browserId) === actor)
+-      this._browserIdToActor.delete(browserId);
++    const context = actor.browsingContext;
++    this._browsingContextToTarget.get(context.id)?.removeActor(actor);
++    if (this._browsingContextToActor.get(context.id) === actor)
++      this._browsingContextToActor.delete(context.id);
++    if (this._browserIdToActor.get(context.browserId) === actor)
++      this._browserIdToActor.delete(context.browserId);
+   }
+ 
+ 
+@@ -405,7 +448,7 @@
  }
  
  export class PageTarget {
 -  constructor(registry, win, tab, browserContext, opener) {
-+  constructor(registry, win, tab, browserContext, opener, popupPanel = null, sidebarController = null, sidebarCommandID = null, sidebarExtensionID = null) {  
++  constructor(registry, win, tab, browserContext, opener, uiHost = null) {
      helper.decorateAsEventEmitter(this);
  
      this._targetId = helper.generateId();
-     this._registry = registry;
+@@ -413,7 +456,10 @@
      this._window = win;
--    this._gBrowser = win.gBrowser;
-+    this._gBrowser = (popupPanel || sidebarController) ? { documentGlobal: tab.linkedBrowser.contentWindow } : win.gBrowser;
+     this._gBrowser = win.gBrowser;
      this._tab = tab;
-+    this._popupPanel = popupPanel; 
-+    this._sidebarController = sidebarController;
-+    this._sidebarCommandID = sidebarCommandID;
-+    this._sidebarExtensionID = sidebarExtensionID; 
-     this._linkedBrowser = tab.linkedBrowser;
+-    this._linkedBrowser = tab.linkedBrowser;
++    this._uiHost = uiHost;
++    this._linkedBrowser = uiHost ? uiHost.browser : tab.linkedBrowser;
++    this._uiChildren = new Set();
++    this._uiDisposers = [];
      this._browserContext = browserContext;
      this._viewportSize = undefined;
-@@ -898,6 +997,118 @@
-   DialogClosed: Symbol('PageTarget.DialogClosed'),
- };
+     this._deviceScaleFactor = undefined;
+@@ -436,32 +482,58 @@
+       interceptFileChooserDialog: false,
+     };
  
-+
-+const originalPopupActivateAndRun = PageTarget.prototype.activateAndRun;
-+PageTarget.prototype.activateAndRun = function(callback = () => {}, options = {}) {
-+  if (!this._popupPanel)
-+    return originalPopupActivateAndRun.call(this, callback, options);
-+  if (this._disposed || this._popupPanel.state !== 'open')
-+    throw new Error('Popup page is closed');
-+  return callback();
-+};
-+
-+const originalPopupClose = PageTarget.prototype.close;
-+PageTarget.prototype.close = function(runBeforeUnload = false) {
-+  if (!this._popupPanel)
-+    return originalPopupClose.call(this, runBeforeUnload);
-+  if (!this._disposed && this._popupPanel.state !== 'closed' && this._popupPanel.state !== 'hiding')
-+    this._popupPanel.hidePopup();
-+};
-+
-+const originalPopupUpdateViewportSize = PageTarget.prototype.updateViewportSize;
-+PageTarget.prototype.updateViewportSize = async function() {
-+  if (!this._popupPanel)
-+    return originalPopupUpdateViewportSize.call(this);
-+  await waitForWindowReady(this._window);
-+  this.updateDPPXOverride();
-+  this.updateScreenEmulation();
-+  const viewportSize = this._viewportSize || this._browserContext.defaultViewportSize;
-+  if (viewportSize) {
-+    const { width, height } = viewportSize;
-+    this._linkedBrowser.style.setProperty('width', width + 'px');
-+    this._linkedBrowser.style.setProperty('min-width', width + 'px');
-+    this._linkedBrowser.style.setProperty('height', height + 'px');
-+    this._linkedBrowser.style.setProperty('min-height', height + 'px');
-+  } else {
-+    this._linkedBrowser.style.removeProperty('width');
-+    this._linkedBrowser.style.removeProperty('min-width');
-+    this._linkedBrowser.style.removeProperty('height');
-+    this._linkedBrowser.style.removeProperty('min-height');
++    // Non-remote chrome <browser> elements have no webProgress; observe their docShell,
++    // whose web progress also reports subframes.
++    const linkedProgress = this._linkedBrowser.webProgress
++      ? this._linkedBrowser
++      : this._linkedBrowser.docShell?.QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIWebProgress);
+     const navigationListener = {
+       QueryInterface: ChromeUtils.generateQI([Ci.nsIWebProgressListener, Ci.nsISupportsWeakReference]),
+-      onLocationChange: (aWebProgress, aRequest, aLocation) => this._onNavigated(aLocation),
++      onLocationChange: (aWebProgress, aRequest, aLocation) => {
++        if (linkedProgress === this._linkedBrowser || aWebProgress === linkedProgress)
++          this._onNavigated(aLocation);
++      },
+     };
+     this._eventListeners = [
+       helper.addObserver(this._updateModalDialogs.bind(this), 'common-dialog-loaded'),
+-      helper.addProgressListener(tab.linkedBrowser, navigationListener, Ci.nsIWebProgress.NOTIFY_LOCATION),
++      ...(uiHost?.windowTarget || !linkedProgress ? [] : [helper.addProgressListener(linkedProgress, navigationListener, Ci.nsIWebProgress.NOTIFY_LOCATION)]),
+       helper.addEventListener(this._linkedBrowser, 'DOMModalDialogClosed', event => this._updateModalDialogs()),
+-      helper.addEventListener(this._linkedBrowser, 'WillChangeBrowserRemoteness', event => this._willChangeBrowserRemoteness()),
++      // The event bubbles from nested browsers: from tabs up to the chrome window, and
++      // from a sidebar panel's browser up to the sidebar browser.
++      helper.addEventListener(this._linkedBrowser, 'WillChangeBrowserRemoteness', event => {
++        if (event.target === this._linkedBrowser)
++          this._willChangeBrowserRemoteness();
++      }),
+     ];
+ 
+     this._disposed = false;
++    // Settles when the target goes away, e.g. when an input event closes its own page.
++    this._disposedPromise = new Promise(resolve => this._resolveDisposed = resolve);
+     browserContext.pages.add(this);
+     this._registry._browserToTarget.set(this._linkedBrowser, this);
+ 
+-    const browserId = this._linkedBrowser.browsingContext.browserId;
+-    this._browserId = browserId;
+-    this._registry._browserIdToTarget.set(browserId, this);
+-    const actor = this._registry._browserIdToActor.get(browserId);
++    const context = this._linkedBrowser.browsingContext;
++    this._browserId = context.browserId;
++    this._browsingContextId = context.id;
++    this._registry._browsingContextToTarget.set(context.id, this);
++    if (!context.parent)
++      this._registry._browserIdToTarget.set(context.browserId, this);
++    const actor = this._registry._browsingContextToActor.get(context.id);
+     if (actor)
+       this.setActor(actor);
++    this.publishUiMetadata();
+ 
+     this._registry.emit(TargetRegistry.Events.TargetCreated, this);
+   }
+ 
+   async activateAndRun(callback = () => {}, { muteNotificationsPopup = false } = {}) {
++    if (this._uiHost) {
++      if (this._disposed || !this.isUiVisible())
++        throw new Error('Firefox UI target is not visible or has been closed');
++      if (this._uiHost.windowTarget)
++        this._window.focus();
++      return callback();
++    }
+     const ownerWindow = this._tab.linkedBrowser.documentGlobal;
+     const tabBrowser = ownerWindow.gBrowser;
+     // Serialize all tab-switching commands per tabbed browser
+@@ -490,8 +562,15 @@
+   }
+ 
+   setActor(actor) {
++    const context = actor.browsingContext;
++    if (this._browsingContextId !== context.id) {
++      this._registry._browsingContextToTarget.delete(this._browsingContextId);
++      this._browsingContextId = context.id;
++      this._registry._browsingContextToTarget.set(context.id, this);
++    }
+     this._actor = actor;
+     this._channel.bindToActor(actor);
++    this.publishUiMetadata();
+   }
+ 
+   removeActor(actor) {
+@@ -527,7 +606,16 @@
+     return this._browserContext;
+   }
+ 
++  // Emulation fields can only be set on top-level browsing contexts. In-process chrome
++  // <browser> elements, like the sidebar and window-modal dialogs, host nested ones;
++  // writing these fields there crashes the parent process.
++  _skipsEmulation(browsingContext = undefined) {
++    return !!(browsingContext || this._linkedBrowser.browsingContext)?.parent;
 +  }
-+  const actualSize = this._linkedBrowser.getBoundingClientRect();
-+  await this._channel.connect('').send('awaitViewportDimensions', {
-+    width: actualSize.width / this._zoom,
-+    height: actualSize.height / this._zoom,
-+  });
++
+   updateOverridesForBrowsingContext(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     this.updateTouchOverride(browsingContext);
+     this.updateUserAgent(browsingContext);
+     this.updateTimezoneOverride(browsingContext);
+@@ -546,6 +634,8 @@
+   }
+ 
+   updateForceOffline(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     (browsingContext || this._linkedBrowser.browsingContext).forceOffline = this._browserContext.forceOffline;
+   }
+ 
+@@ -555,6 +645,8 @@
+   }
+ 
+   updateCacheDisabled(browsingContext = this._linkedBrowser.browsingContext) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     const enableFlags = Ci.nsIRequest.LOAD_NORMAL;
+     const disableFlags = Ci.nsIRequest.LOAD_BYPASS_CACHE |
+                   Ci.nsIRequest.INHIBIT_CACHING;
+@@ -563,27 +655,39 @@
+   }
+ 
+   updateTouchOverride(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     (browsingContext || this._linkedBrowser.browsingContext).touchEventsOverride = this._browserContext.touchOverride ? 'enabled' : 'none';
+   }
+ 
+   updateUserAgent(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     (browsingContext || this._linkedBrowser.browsingContext).customUserAgent = this._browserContext.defaultUserAgent;
+   }
+ 
+   updateTimezoneOverride(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     (browsingContext || this._linkedBrowser.browsingContext).timezoneOverride = this._browserContext.timezoneOverride;
+   }
+ 
+   updateLanguageOverride(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     browsingContext ||= this._linkedBrowser.browsingContext;
+     browsingContext.languageOverride = this._browserContext.languageOverride || '';
+   }
+ 
+   updatePlatform(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     (browsingContext || this._linkedBrowser.browsingContext).customPlatform = this._browserContext.defaultPlatform;
+   }
+ 
+   updateDPPXOverride(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     browsingContext ||= this._linkedBrowser.browsingContext;
+     const deviceScaleFactor = this._deviceScaleFactor ?? this._browserContext.deviceScaleFactor;
+     const dppx = this._zoom * (deviceScaleFactor || this._initialDPPX);
+@@ -591,6 +695,8 @@
+   }
+ 
+   updateScreenEmulation(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     browsingContext ||= this._linkedBrowser.browsingContext;
+     const screenSize = this._screenSize || this._browserContext.screenSize;
+     const isMobile = this._isMobile ?? this._browserContext.isMobile;
+@@ -617,6 +723,8 @@
+   }
+ 
+   async updateZoom(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     browsingContext ||= this._linkedBrowser.browsingContext;
+     // Update dpr first, and then UI zoom.
+     this.updateDPPXOverride(browsingContext);
+@@ -624,6 +732,8 @@
+   }
+ 
+   _updateModalDialogs() {
++    if (!this._linkedBrowser.tabDialogBox)
++      return;
+     const prompts = new Set(this._linkedBrowser.tabDialogBox.getContentDialogManager().dialogs.map(dialog => dialog.frameContentWindow.Dialog));
+     for (const dialog of this._dialogs.values()) {
+       if (!prompts.has(dialog.prompt())) {
+@@ -647,6 +757,28 @@
+     this.updateDPPXOverride();
+     this.updateScreenEmulation();
+ 
++    if (this._uiHost) {
++      const host = this._uiHost;
++      const viewport = this._viewportSize || (host.kind === 'extension-popup' ? this._browserContext.defaultViewportSize : null);
++      if (host.windowTarget) {
++        if (this._viewportSize)
++          this._window.resizeBy(viewport.width - this._window.innerWidth, viewport.height - this._window.innerHeight);
++      } else if (viewport) {
++        for (const [name, value] of Object.entries(viewport)) {
++          this._linkedBrowser.style.setProperty(name, value + 'px');
++          this._linkedBrowser.style.setProperty('min-' + name, value + 'px');
++        }
++      }
++      if (!this.isUiVisible())
++        return;
++      const size = host.windowTarget
++        ? { width: this._window.innerWidth, height: this._window.innerHeight }
++        : this._linkedBrowser.getBoundingClientRect();
++      await this._channel.connect('').send('awaitViewportDimensions', {
++        width: size.width / this._zoom, height: size.height / this._zoom,
++      });
++      return;
++    }
+     // Viewport size is defined by three arguments:
+     // 1. default size. Could be explicit if set as part of `window.open` call, e.g.
+     //   `window.open(url, title, 'width=400,height=400')`
+@@ -693,6 +825,8 @@
+   }
+ 
+   updateEmulatedMedia(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     (browsingContext || this._linkedBrowser.browsingContext).mediumOverride = this.mediumOverride;
+   }
+ 
+@@ -702,6 +836,8 @@
+   }
+ 
+   updateColorSchemeOverride(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     (browsingContext || this._linkedBrowser.browsingContext).prefersColorSchemeOverride = this.colorScheme || this._browserContext.colorScheme || 'none';
+   }
+ 
+@@ -711,6 +847,8 @@
+   }
+ 
+   updateReducedMotionOverride(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     (browsingContext || this._linkedBrowser.browsingContext).prefersReducedMotionOverride = this.reducedMotion || this._browserContext.reducedMotion || 'none';
+   }
+ 
+@@ -720,6 +858,8 @@
+   }
+ 
+   updateContrastOverride(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     (browsingContext || this._linkedBrowser.browsingContext).prefersContrastOverride = this.contrast || this._browserContext.contrast || 'none';
+   }
+ 
+@@ -729,6 +869,8 @@
+   }
+ 
+   updateForcedColorsOverride(browsingContext = undefined) {
++    if (this._skipsEmulation(browsingContext))
++      return;
+     const isActive = this.forcedColors === 'active' || this._browserContext.forcedColors === 'active';
+     (browsingContext || this._linkedBrowser.browsingContext).forcedColorsOverride = isActive ? 'active' : 'none';
+   }
+@@ -756,9 +898,26 @@
+   }
+ 
+   close(runBeforeUnload = false) {
+-    this._gBrowser.removeTab(this._tab, {
+-      skipPermitUnload: !runBeforeUnload,
+-    });
++    if (this._disposed)
++      return;
++    const host = this._uiHost;
++    if (host?.windowTarget) {
++      this._window.close();
++    } else if (host?.panel) {
++      host.panel.hidePopup();
++    } else if (host?.sidebarController) {
++      host.sidebarController.hide({ dismissPanel: true });
++      this.dispose();
++    } else if (host) {
++      const dialog = this._linkedBrowser.closest('.dialogOverlay');
++      if (dialog?._dialog)
++        dialog._dialog.close();
++      else
++        this._linkedBrowser.remove();
++      this.dispose();
++    } else {
++      this._gBrowser.removeTab(this._tab, { skipPermitUnload: !runBeforeUnload });
++    }
+   }
+ 
+   channel() {
+@@ -784,10 +943,53 @@
+   }
+ 
+   _updateCrossProcessCookie() {
+-    Services.ppmm.sharedData.set('juggler:page-cookie-' + this._browserId, this.crossProcessCookie);
++    Services.ppmm.sharedData.set('juggler:page-cookie-context-' + this._browsingContextId, this.crossProcessCookie);
++    if (!this._linkedBrowser.browsingContext.parent)
++      Services.ppmm.sharedData.set('juggler:page-cookie-' + this._browserId, this.crossProcessCookie);
+     Services.ppmm.sharedData.flush();
+   }
+ 
++  isUiVisible() {
++    const host = this._uiHost;
++    if (!host)
++      return !this._disposed;
++    if (this._disposed || this._window.closed)
++      return false;
++    if (host.windowTarget)
++      return true;
++    if (!host.browser.isConnected || !host.browser.checkVisibility())
++      return false;
++    if (host.panel && !['open', 'showing'].includes(host.panel.state))
++      return false;
++    if (host.sidebarController && (!host.sidebarController.isOpen || host.sidebarController.currentID !== host.sidebarCommandID))
++      return false;
++    return true;
++  }
++
++  uiInfo() {
++    const host = this._uiHost;
++    return {
++      targetId: this.id(),
++      kind: host?.kind || 'tab',
++      primary: !!host?.primary,
++      browsingContextId: this._browsingContextId,
++      ownerWindowId: this._window.browsingContext.id,
++      parentTargetId: this._uiParent?.id(),
++      extensionId: host?.extensionId,
++      visible: this.isUiVisible(),
++    };
++  }
++
++  publishUiMetadata() {
++    if (!this._browsingContextId || this._disposed)
++      return;
++    const metadata = this.uiInfo();
++    this.crossProcessCookie.uiTargetMetadata = metadata;
++    this._updateCrossProcessCookie();
++    if (this._actor)
++      this._channel.connect('page').send('setUiTargetMetadata', metadata).catch(() => {});
++  }
++
+   async ensurePermissions() {
+     await this._channel.connect('').send('ensurePermissions', {}).catch(e => void e);
+   }
+@@ -822,7 +1024,9 @@
+     if (width < 10 || width > 10000 || height < 10 || height > 10000)
+       throw new Error("Invalid size");
+ 
+-    const docShell = this._gBrowser.documentGlobal.docShell;
++    const docShell = this._uiHost
++      ? (this._uiHost.windowTarget ? this._window.docShell : this._linkedBrowser.browsingContext.docShell)
++      : this._gBrowser.documentGlobal.docShell;
+     // Exclude address bar and navigation control from the video.
+     const rect = this.linkedBrowser().getBoundingClientRect();
+     const devicePixelRatio = this._window.devicePixelRatio;
+@@ -856,6 +1060,9 @@
+   }
+ 
+   ensureContextMenuClosed() {
++    // Chrome windows host these popups; input there operates them instead.
++    if (this._uiHost?.windowTarget)
++      return;
+     // Close context menu, if any, since it might capture mouse events on Linux
+     // and prevent browser shutdown on MacOS.
+     const doc = this._linkedBrowser.ownerDocument;
+@@ -871,21 +1078,37 @@
+   }
+ 
+   dispose() {
+-    this.ensureContextMenuClosed();
++    if (this._disposed)
++      return;
+     this._disposed = true;
++    this._resolveDisposed();
++    if (this._actor)
++      this.removeActor(this._actor);
++    // In-process chrome browsers (the sidebar) outlive their targets; let the next
++    // target start from fresh content agents.
++    const context = this._linkedBrowser.browsingContext;
++    if (this._uiHost && !this._uiHost.windowTarget && context && !context.isContent && !context.isDiscarded)
++      ChromeUtils.importESModule('chrome://juggler/content/content/JugglerFrameChild.jsm').resetAgents(context);
++    for (const child of [...this._uiChildren])
++      child.dispose();
++    this._uiParent?._uiChildren.delete(this);
++    for (const dispose of this._uiDisposers.splice(0))
++      dispose();
++    this.ensureContextMenuClosed();
+     this.stopScreencast();
+     this._browserContext.pages.delete(this);
+-    this._registry._browserToTarget.delete(this._linkedBrowser);
+-    this._registry._browserIdToTarget.delete(this._browserId);
+-    Services.ppmm.sharedData.delete('juggler:page-cookie-' + this._browserId);
++    if (this._registry._browserToTarget.get(this._linkedBrowser) === this)
++      this._registry._browserToTarget.delete(this._linkedBrowser);
++    this._registry._browsingContextToTarget.delete(this._browsingContextId);
++    const ownsBrowserId = this._registry._browserIdToTarget.get(this._browserId) === this;
++    if (ownsBrowserId)
++      this._registry._browserIdToTarget.delete(this._browserId);
++    Services.ppmm.sharedData.delete('juggler:page-cookie-context-' + this._browsingContextId);
++    if (ownsBrowserId)
++      Services.ppmm.sharedData.delete('juggler:page-cookie-' + this._browserId);
+     Services.ppmm.sharedData.flush();
+-    try {
+-      helper.removeListeners(this._eventListeners);
+-    } catch (e) {
+-      // In some cases, removing listeners from this._linkedBrowser fails
+-      // because it is already half-destroyed.
+-      if (e)
+-        dump(e.message + '\n' + e.stack + '\n');
++    for (const remove of this._eventListeners.splice(0)) {
++      try { remove(); } catch (error) { dump('Firefox UI listener cleanup: ' + error + '\n'); }
+     }
+     this._registry.emit(TargetRegistry.Events.TargetDestroyed, this);
+   }
+@@ -1343,3 +1566,251 @@
+   DownloadCreated: Symbol('TargetRegistry.Events.DownloadCreated'),
+   DownloadFinished: Symbol('TargetRegistry.Events.DownloadFinished'),
+ };
++
++TargetRegistry.prototype.registerTarget = function(ownerWindow, browser, options) {
++  const context = browser.browsingContext;
++  const existing = this._browserToTarget.get(browser);
++  if (existing && !existing._disposed &&
++      (!options.sidebarCommandID || existing._uiHost?.sidebarCommandID === options.sidebarCommandID)) {
++    existing.publishUiMetadata();
++    return existing;
++  }
++  existing?.dispose();
++  const parent = options.parent || this._chromeWindowTargets.get(ownerWindow);
++  const browserContext = options.browserContext || options.opener?.browserContext() ||
++    parent?.browserContext() || this._userContextIdToBrowserContext.get(context.originAttributes.userContextId || 0);
++  if (!browserContext)
++    throw new Error('Firefox UI target has no Playwright browser context');
++  const host = options.tab ? null : { ...options, browser, parent };
++  const target = new PageTarget(this, ownerWindow, options.tab || null, browserContext, options.opener, host);
++  target._uiParent = parent;
++  parent?._uiChildren.add(target);
++  target.publishUiMetadata();
++  if (host?.panel) {
++    target._uiDisposers.push(helper.addEventListener(host.panel, 'popuphidden', event => {
++      if (event.target === host.panel)
++        target.dispose();
++    }));
++  }
++  target.updateOverridesForBrowsingContext(context);
++  if (options.updateViewport !== false)
++    target.updateViewportSize().catch(error => {
++      if (!target._disposed)
++        dump('Firefox UI viewport update failed: ' + error + '\n');
++    });
++  return target;
 +};
 +
-+
-+const originalSidebarActivateAndRun = PageTarget.prototype.activateAndRun;
-+PageTarget.prototype.activateAndRun = function(callback = () => {}, options = {}) {
-+  if (!this._sidebarController)
-+    return originalSidebarActivateAndRun.call(this, callback, options);
-+  if (
-+    this._disposed ||
-+    !this._sidebarController.isOpen ||
-+    this._sidebarController.currentID !== this._sidebarCommandID
-+  )
-+    throw new Error('Sidebar page is closed');
-+  return callback();
-+};
-+
-+const originalSidebarClose = PageTarget.prototype.close;
-+PageTarget.prototype.close = function(runBeforeUnload = false) {
-+  if (!this._sidebarController)
-+    return originalSidebarClose.call(this, runBeforeUnload);
-+  if (this._disposed)
++TargetRegistry.prototype.registerChromeWindow = function(win) {
++  if (win.closed || !win.isChromeWindow || !win.document.documentURI.startsWith('chrome://'))
 +    return;
-+  this._sidebarController.hide({ dismissPanel: true });
-+  if (!this._sidebarController.isOpen || this._sidebarController.currentID !== this._sidebarCommandID)
-+    this.dispose();
++  const existing = this._chromeWindowTargets.get(win);
++  if (existing && !existing._disposed)
++    return existing;
++  const kind = win.document.documentURI === 'chrome://browser/content/browser.xhtml' ? 'chrome-window' : 'chrome-ui-window';
++  const primary = kind === 'chrome-window' && !this._uiPrimaryWindow;
++  if (primary)
++    this._uiPrimaryWindow = win;
++  // A chrome document has its own docshell, not a tab-linked <browser>.
++  // Expose the small DOM host surface used by PageHandler without tab emulation.
++  const host = {
++    get browsingContext() { return win.docShell.browsingContext; },
++    get contentWindow() { return win; },
++    get ownerDocument() { return win.document; },
++    get style() { return win.document.documentElement.style; },
++    get webNavigation() { return win.docShell.QueryInterface(Ci.nsIWebNavigation); },
++    getBoundingClientRect() { return new win.DOMRect(0, 0, win.innerWidth, win.innerHeight); },
++    scrollRectIntoViewIfNeeded(x, y, width, height) {
++      win.document.documentElement.scrollRectIntoViewIfNeeded(x, y, width, height);
++    },
++    addEventListener(...args) { win.addEventListener(...args); },
++    removeEventListener(...args) { win.removeEventListener(...args); },
++  };
++  const target = this.registerTarget(win, host, { kind, primary, windowTarget: true });
++  this._chromeWindowTargets.set(win, target);
++  for (const page of this.targets()) {
++    if (page._window === win && page !== target && !page._uiParent) {
++      page._uiParent = target;
++      target._uiChildren.add(page);
++      page.publishUiMetadata();
++    }
++  }
++  this.observeUiDocument(win.document, target);
++  return target;
 +};
 +
-+const originalSidebarDispose = PageTarget.prototype.dispose;
-+PageTarget.prototype.dispose = function() {
-+  if (this._sidebarController && this._disposed)
++TargetRegistry.prototype.discoverEmbeddedBrowser = function(browser, parent) {
++  const context = browser.browsingContext;
++  if (!context || !browser.isConnected || !(browser.webProgress || browser.docShell))
 +    return;
-+  if (this._sidebarController) {
-+    this._sidebarObserver?.disconnect();
-+    this._sidebarObserver = undefined;
-+    if (this._sidebarHostBrowser && this._sidebarHostLoadListener)
-+      this._sidebarHostBrowser.removeEventListener('load', this._sidebarHostLoadListener, true);
-+    if (this._sidebarOwnerWindow && this._sidebarOwnerUnloadListener)
-+      this._sidebarOwnerWindow.removeEventListener('unload', this._sidebarOwnerUnloadListener);
++  const win = context.topChromeWindow || browser.ownerGlobal;
++  // A document being torn down no longer has a window.
++  if (!win || win.gBrowser?.browsers.includes(browser))
++    return;
++  // Tab-modal and content-modal dialogs surface as Playwright dialogs of their tab.
++  if (browser.closest('.dialogStack'))
++    return;
++  const viewType = browser.getAttribute('webextension-view-type');
++  const url = browser.currentURI?.spec || '';
++  // The sidebar browser stays in the document while the sidebar is closed; its Page
++  // lives while a panel is open.
++  const sidebar = win.SidebarController;
++  if (browser === sidebar?.browser && !sidebar.isOpen) {
++    this.targetForBrowser(browser)?.dispose();
++    return;
 +  }
-+  return originalSidebarDispose.call(this);
-+};
-+
-+const originalSidebarUpdateViewportSize = PageTarget.prototype.updateViewportSize;
-+PageTarget.prototype.updateViewportSize = async function() {
-+  if (!this._sidebarController)
-+    return originalSidebarUpdateViewportSize.call(this);
-+  await waitForWindowReady(this._window);
-+  this.updateDPPXOverride();
-+  this.updateScreenEmulation();
-+  const viewportSize = this._viewportSize;
-+  if (viewportSize) {
-+    const { width, height } = viewportSize;
-+    this._linkedBrowser.style.setProperty('width', width + 'px');
-+    this._linkedBrowser.style.setProperty('min-width', width + 'px');
-+    this._linkedBrowser.style.setProperty('height', height + 'px');
-+    this._linkedBrowser.style.setProperty('min-height', height + 'px');
-+  } else {
-+    this._linkedBrowser.style.removeProperty('width');
-+    this._linkedBrowser.style.removeProperty('min-width');
-+    this._linkedBrowser.style.removeProperty('height');
-+    this._linkedBrowser.style.removeProperty('min-height');
-+  }
-+  const actualSize = this._linkedBrowser.getBoundingClientRect();
-+  await this._channel.connect('').send('awaitViewportDimensions', {
-+    width: actualSize.width / this._zoom,
-+    height: actualSize.height / this._zoom,
++  // In-process browsers hold a blank page as a placeholder (dialog templates, the sidebar
++  // until a panel loads); their Pages start with the document they get loaded with.
++  if (!browser.isRemoteBrowser && url === 'about:blank' && !this.targetForBrowser(browser))
++    return;
++  if (!/^(about:|chrome:|moz-extension:)/.test(url) ||
++      viewType === 'background' || url === 'chrome://extensions/content/dummy.xhtml')
++    return;
++  const panel = browser.closest('panel');
++  if (panel?.id === 'webextension-remote-preload-panel')
++    return;
++  if (viewType === 'popup' && !['open', 'showing'].includes(panel?.state))
++    return;
++  const controller = viewType === 'sidebar' ? win.SidebarController : null;
++  const extensionId = context.currentWindowGlobal?.documentPrincipal?.addonId ||
++    controller?.sidebars.get(controller.currentID)?.extensionId;
++  const kind = viewType === 'popup' ? 'extension-popup' :
++    viewType === 'sidebar' ? 'extension-sidebar' : 'embedded-browser';
++  const target = this.registerTarget(win, browser, {
++    kind, parent, panel: viewType === 'popup' ? panel : null,
++    extensionId, sidebarController: controller, sidebarCommandID: controller?.currentID,
++    opener: viewType === 'popup' || viewType === 'sidebar' ? this.targetForBrowser(win.gBrowser?.selectedBrowser) : undefined,
 +  });
++  const document = browser.contentDocument;
++  if (document?.nodePrincipal.isSystemPrincipal)
++    this.observeUiDocument(document, target);
++  return target;
 +};
 +
- function fromProtocolColorScheme(colorScheme) {
-   if (colorScheme === 'light' || colorScheme === 'dark')
-     return colorScheme;
++TargetRegistry.prototype.observeUiDocument = function(document, parent) {
++  if (!document?.documentElement || this._uiDocuments.has(document))
++    return;
++  const win = document.defaultView;
++  const ownerWindow = win.browsingContext.topChromeWindow || win;
++  const browsers = new Map();
++  const registry = this;
++  // Privileged pages loaded into tabs in the parent process, like about:preferences,
++  // host UI browsers of their own (subdialogs); expose those as Pages of the tab.
++  const tabBrowsers = new Map();
++  const observeTabDocument = browser => {
++    const tabDocument = !browser.isRemoteBrowser && browser.contentDocument;
++    if (tabDocument?.nodePrincipal?.isSystemPrincipal)
++      registry.observeUiDocument(tabDocument, registry.targetForBrowser(browser));
++  };
++  const onBrowserReady = browser => {
++    // Discover after the frame loader exists; <browser> is often inserted before it.
++    const target = registry.discoverEmbeddedBrowser(browser, parent);
++    if (target && target._uiHost?.sidebarController && !target.isUiVisible())
++      target.dispose();
++  };
++  const scan = () => {
++    for (const [browser, dispose] of browsers) {
++      if (!browser.isConnected || browser.ownerDocument !== document) {
++        dispose();
++        browsers.delete(browser);
++        registry.targetForBrowser(browser)?.dispose();
++      }
++    }
++    for (const [browser, removeListener] of tabBrowsers) {
++      if (!browser.isConnected || browser.ownerDocument !== document) {
++        removeListener();
++        tabBrowsers.delete(browser);
++      }
++    }
++    for (const browser of document.querySelectorAll('browser')) {
++      try {
++        if (ownerWindow.gBrowser?.browsers.includes(browser)) {
++          if (!tabBrowsers.has(browser))
++            tabBrowsers.set(browser, helper.addEventListener(browser, 'load', () => observeTabDocument(browser), true));
++          observeTabDocument(browser);
++          continue;
++        }
++        if (!browsers.has(browser)) {
++          const disposers = [
++            helper.addEventListener(browser, 'load', () => onBrowserReady(browser), true),
++            helper.addEventListener(browser, 'XULFrameLoaderCreated', () => onBrowserReady(browser)),
++          ];
++          browsers.set(browser, () => helper.removeListeners(disposers));
++        }
++        onBrowserReady(browser);
++      } catch (error) {
++        dump(`Juggler UI browser discovery failed: ${error}\n`);
++      }
++    }
++    // Sidebar hide/change is a host transition, not a browsing-context navigation.
++    for (const target of parent?._uiChildren || []) {
++      if (target._uiHost?.sidebarController && !target.isUiVisible())
++        target.dispose();
++    }
++  };
++  const observer = new win.MutationObserver(records => {
++    if (records.some(record => record.type === 'childList' || record.target.localName === 'browser' || record.attributeName === 'hidden'))
++      scan();
++  });
++  observer.observe(document.documentElement, { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'src', 'remote'] });
++  const onPageHide = event => {
++    if (event.target === document)
++      state.dispose();
++  };
++  win.addEventListener('pagehide', onPageHide, true);
++  const state = {
++    ownerWindow,
++    dispose() {
++      if (!registry._uiDocuments.delete(document))
++        return;
++      observer.disconnect();
++      win.removeEventListener('pagehide', onPageHide, true);
++      for (const [browser, dispose] of browsers) {
++        dispose();
++        registry.targetForBrowser(browser)?.dispose();
++      }
++      browsers.clear();
++      for (const removeListener of tabBrowsers.values())
++        removeListener();
++      tabBrowsers.clear();
++    },
++  };
++  this._uiDocuments.set(document, state);
++  scan();
++};
++
++TargetRegistry.prototype.closeChromeWindow = function(win) {
++  for (const state of [...this._uiDocuments.values()]) {
++    if (state.ownerWindow === win)
++      state.dispose();
++  }
++  this._chromeWindowTargets.get(win)?.dispose();
++  this._chromeWindowTargets.delete(win);
++  if (this._uiPrimaryWindow === win) {
++    this._uiPrimaryWindow = null;
++    const next = [...this._chromeWindowTargets.values()].find(target => target._uiHost.kind === 'chrome-window');
++    if (next) {
++      this._uiPrimaryWindow = next._window;
++      next._uiHost.primary = true;
++      next.publishUiMetadata();
++    }
++  }
++};
++
++TargetRegistry.prototype.registerBrowserChromeWindows = function() {
++  const getWindow = appWindow => appWindow instanceof Ci.nsIAppWindow
++    ? appWindow.QueryInterface(Ci.nsIInterfaceRequestor).getInterface(Ci.nsIDOMWindowInternal || Ci.nsIDOMWindow)
++    : appWindow;
++  const onOpenWindow = async appWindow => {
++    const win = getWindow(appWindow);
++    if (!win.isChromeWindow)
++      return;
++    if (win.document.readyState === 'loading' || win.document.readyState === 'uninitialized' || win.document.isUncommittedInitialDocument)
++      await helper.awaitEvent(win, 'DOMContentLoaded');
++    this.registerChromeWindow(win);
++  };
++  const onCloseWindow = appWindow => this.closeChromeWindow(getWindow(appWindow));
++  Services.wm.addListener({ onOpenWindow, onCloseWindow });
++  for (const win of Services.wm.getEnumerator(null))
++    void onOpenWindow(win);
++};
 diff --git a/omni.ja/chrome/juggler/content/protocol/PageHandler.js b/omni.ja/chrome/juggler/content/protocol/PageHandler.js
 --- a/omni.ja/chrome/juggler/content/protocol/PageHandler.js
 +++ b/omni.ja/chrome/juggler/content/protocol/PageHandler.js
-@@ -685,3 +685,89 @@
-     return await worker.sendMessage(JSON.parse(message));
+@@ -8,7 +8,7 @@
+ const {NetUtil} = ChromeUtils.importESModule('resource://gre/modules/NetUtil.sys.mjs');
+ const {NetworkObserver, PageNetwork} = ChromeUtils.importESModule('chrome://juggler/content/NetworkObserver.js');
+ const {PageTarget} = ChromeUtils.importESModule('chrome://juggler/content/TargetRegistry.js');
+-const {setTimeout} = ChromeUtils.importESModule('resource://gre/modules/Timer.sys.mjs');
++const {setTimeout, clearTimeout} = ChromeUtils.importESModule('resource://gre/modules/Timer.sys.mjs');
+ 
+ const Cc = Components.classes;
+ const Ci = Components.interfaces;
+@@ -84,6 +84,11 @@
+ 
+     this._reportedFrameIds = new Set();
+     this._networkEventsForUnreportedFrameIds = new Map();
++    // Navigations reported as started and not yet committed or aborted, by frame id.
++    this._pendingNavigationIds = new Map();
++    // Keys and mouse buttons pressed and not yet released, see heldInputReleased().
++    this._heldInputs = new Set();
++    this._heldInputWaiters = [];
+ 
+     // `Page.ready` protocol event is emitted whenever page has completed initialization, e.g.
+     // finished all the transient navigations to the `about:blank`.
+@@ -116,9 +121,22 @@
+         pageFrameDetached: emitProtocolEvent('Page.frameDetached'),
+         pageLinkClicked: emitProtocolEvent('Page.linkClicked'),
+         pageWillOpenNewWindowAsynchronously: emitProtocolEvent('Page.willOpenNewWindowAsynchronously'),
+-        pageNavigationAborted: emitProtocolEvent('Page.navigationAborted'),
+-        pageNavigationCommitted: emitProtocolEvent('Page.navigationCommitted'),
+-        pageNavigationStarted: emitProtocolEvent('Page.navigationStarted'),
++        pageNavigationAborted: params => {
++          this._pendingNavigationIds.delete(params.frameId);
++          this._session.emitEvent('Page.navigationAborted', params);
++        },
++        pageNavigationCommitted: params => {
++          // Fresh content agents, e.g. after the page moved to another process mid-load,
++          // replay the commit without the id of the navigation they did not see start.
++          if (!params.navigationId && this._pendingNavigationIds.has(params.frameId))
++            params = { ...params, navigationId: this._pendingNavigationIds.get(params.frameId) };
++          this._pendingNavigationIds.delete(params.frameId);
++          this._session.emitEvent('Page.navigationCommitted', params);
++        },
++        pageNavigationStarted: params => {
++          this._pendingNavigationIds.set(params.frameId, params.navigationId);
++          this._session.emitEvent('Page.navigationStarted', params);
++        },
+         pageReady: this._onPageReady.bind(this),
+         pageInputEvent: (event) => this._pageEventSink.emit(event.type, event),
+         pageSameDocumentNavigation: emitProtocolEvent('Page.sameDocumentNavigation'),
+@@ -437,6 +455,10 @@
    }
- }
-+
-+
-+
-+const originalPopupPageReload = PageHandler.prototype['Page.reload'];
-+PageHandler.prototype['Page.reload'] = async function() {
-+  if (this._pageTarget._popupPanel || this._pageTarget._sidebarController) {
-+    this._pageTarget.linkedBrowser().webNavigation.reload(Ci.nsIWebNavigation.LOAD_FLAGS_NONE);
-+    return;
-+  }
-+  return originalPopupPageReload.call(this);
-+};
-+const originalPopupDispatchMouseEvent = PageHandler.prototype['Page.dispatchMouseEvent'];
-+PageHandler.prototype['Page.dispatchMouseEvent'] = async function(options) {
-+  const { type, x, y, button = 0, clickCount, modifiers = 0, buttons = 0 } = options;
-+  const isPopup = !!this._pageTarget._popupPanel;
-+  const isSidebar = !!this._pageTarget._sidebarController;
-+  if (
-+    (!isPopup && !isSidebar) ||
-+    (isPopup && !modifiers) ||
-+    !['mousedown', 'mousemove', 'mouseup'].includes(type)
-+  )
-+    return originalPopupDispatchMouseEvent.call(this, options);
-+
-+  const browser = this._pageTarget._linkedBrowser;
-+  browser.scrollRectIntoViewIfNeeded(x, y, 0, 0);
-+  const bounds = browser.getBoundingClientRect();
-+  if (x < 0 || y < 0 || x > bounds.width || y > bounds.height)
-+    return originalPopupDispatchMouseEvent.call(this, options);
-+
-+
-+  const sendMouseEvent = async eventType => {
-+    await this._contentPage.send('dispatchDragEvent', {
-+      type: eventType,
-+      x,
-+      y,
-+      button,
-+      clickCount,
-+      modifiers,
-+      buttons
-+    });
-+  };
-+
-+  return this._pageTarget.activateAndRun(async () => {
-+    this._pageTarget.ensureContextMenuClosed();
-+    if (type === 'mousedown') {
-+      if (!this._isDragging)
-+        await sendMouseEvent(type);
+ 
+   async ['Page.reload']() {
++    if (this._pageTarget._uiHost) {
++      this._pageTarget.linkedBrowser().webNavigation.reload(Ci.nsIWebNavigation.LOAD_FLAGS_NONE);
 +      return;
 +    }
+     await this._pageTarget.activateAndRun(() => {
+       const doc = this._pageTarget._tab.linkedBrowser.ownerDocument;
+       doc.getElementById('Browser:Reload').doCommand();
+@@ -456,6 +478,7 @@
+   }
+ 
+   async ['Page.dispatchKeyEvent']({type, keyCode, code, key, repeat, location, text}) {
++    this._trackHeldInput(type === 'keydown', type === 'keyup', 'key:' + code);
+     // key events don't fire if we are dragging.
+     if (this._isDragging) {
+       if (type === 'keydown' && key === 'Escape') {
+@@ -470,9 +493,16 @@
+       }
+       return;
+     }
+-    return await this._contentPage.send('dispatchKeyEvent', {type, keyCode, code, key, repeat, location, text});
++    return await this._sendInput('dispatchKeyEvent', {type, keyCode, code, key, repeat, location, text});
+   }
+ 
++  // UI hosts such as dialogs close themselves in response to input, and their content
++  // may never answer then; input to them also completes when the page goes away.
++  _sendInput(method, params) {
++    const sent = this._contentPage.send(method, params);
++    return this._pageTarget._uiHost ? Promise.race([sent, this._pageTarget._disposedPromise]) : sent;
++  }
 +
-+    if (type === 'mousemove') {
-+      this._lastMousePosition = { x, y };
+   async ['Page.dispatchTouchEvent'](options) {
+     return await this._contentPage.send('dispatchTouchEvent', options);
+   }
+@@ -481,7 +511,60 @@
+     return await this._contentPage.send('dispatchTapEvent', options);
+   }
+ 
++  _trackHeldInput(pressed, released, id) {
++    if (pressed)
++      this._heldInputs.add(id);
++    else if (released && this._heldInputs.delete(id) && !this._heldInputs.size)
++      for (const resolve of this._heldInputWaiters.splice(0))
++        resolve();
++  }
++
++  // Resolves once keys and buttons pressed on the page are released, or after timeoutMs.
++  heldInputReleased(timeoutMs) {
++    if (!this._heldInputs.size)
++      return Promise.resolve();
++    return new Promise(resolve => {
++      this._heldInputWaiters.push(resolve);
++      setTimeout(resolve, timeoutMs);
++    });
++  }
++
+   async ['Page.dispatchMouseEvent']({type, x, y, button, clickCount, modifiers, buttons}) {
++    this._trackHeldInput(type === 'mousedown', type === 'mouseup', 'button:' + button);
++    const host = this._pageTarget._uiHost;
++    if (host?.windowTarget) {
++      // Playwright sends move/down/up without waiting for each other. Awaiting an APZ
++      // flush could let a later event overtake an earlier one, so dispatch in order.
++      const dispatch = (this._chromeMouseQueue ?? Promise.resolve()).then(() =>
++        this._pageTarget.activateAndRun(async () => {
++          const win = this._pageTarget._window;
++          if (win.windowUtils.flushApzRepaints())
++            await helper.awaitTopic('apz-repaints-flushed');
++          // As for tabs, a right-button press also opens the context menu.
++          const eventTypes = type === 'mousedown' && button === 2 ? ['mousedown', 'contextmenu'] : [type];
++          for (const eventType of eventTypes) {
++            await new Promise(resolve => win.synthesizeMouseEvent(eventType, x, y, {
++              identifier: win.windowUtils.DEFAULT_MOUSE_POINTER_ID,
++              button, buttons, clickCount, modifiers,
++              pressure: 0,
++              inputSource: win.MouseEvent.MOZ_SOURCE_MOUSE,
++            }, {
++              isDOMEventSynthesized: true,
++              isWidgetEventSynthesized: false,
++              isAsyncEnabled: false,
++            }, resolve));
++          }
++        }));
++      this._chromeMouseQueue = dispatch.catch(() => {});
++      await dispatch;
++      return;
++    }
++    // Popups, sidebars and embedded UI live in their own widgets (XUL panels, nested
++    // browsers); input for them is synthesized inside their document.
++    if (host) {
++      await this._dispatchUiMouseEvent({type, x, y, button, clickCount, modifiers, buttons});
++      return;
++    }
+     const win = this._pageTarget._window;
+     const sendEvents = async (types) => {
+       // 1. Scroll element to the desired location first; the coordinates are relative to the element.
+@@ -608,7 +691,99 @@
+     }, { muteNotificationsPopup: true });
+   }
+ 
++  // Firefox animates some UI hosts into place, like the sidebar sliding in. Input
++  // synthesized inside the host meanwhile is hit-tested where the host is drawn, not
++  // where it is laid out, and misses; let those animations finish first.
++  async _settleHostAnimations(timeoutMs = 1000) {
++    const finished = [];
++    for (let element = this._pageTarget._linkedBrowser; element;) {
++      const document = element.ownerDocument;
++      const lineage = new Set();
++      for (let node = element; node; node = node.parentElement ?? node.getRootNode().host)
++        lineage.add(node);
++      for (const animation of document.getAnimations()) {
++        if (animation.playState !== 'running' || !lineage.has(animation.effect?.target))
++          continue;
++        // Endless animations, like a throbber, never settle.
++        if (animation.effect.getComputedTiming().endTime === Infinity)
++          continue;
++        finished.push(animation.finished);
++      }
++      element = document.defaultView?.browsingContext?.embedderElement;
++    }
++    if (!finished.length)
++      return;
++    let timer;
++    await Promise.race([
++      Promise.allSettled(finished),
++      new Promise(resolve => timer = setTimeout(resolve, timeoutMs)),
++    ]);
++    clearTimeout(timer);
++  }
++
++  async _dispatchUiMouseEvent({type, x, y, button = 0, clickCount, modifiers = 0, buttons = 0}) {
++    await this._settleHostAnimations();
++    const browser = this._pageTarget._linkedBrowser;
++    browser.scrollRectIntoViewIfNeeded(x, y, 0, 0);
++    const bounds = browser.getBoundingClientRect();
++    if (x < 0 || y < 0 || x > bounds.width || y > bounds.height)
++      return;
++    const sendMouseEvent = async eventType => {
++      await this._sendInput('dispatchUiMouseEvent', {
++        type: eventType, x, y, button, clickCount, modifiers, buttons,
++      });
++    };
++    await this._pageTarget.activateAndRun(async () => {
++      if (type === 'mousedown') {
++        this._pageTarget.ensureContextMenuClosed();
++        if (!this._isDragging) {
++          await sendMouseEvent(type);
++          if (button === 2)
++            await sendMouseEvent('contextmenu');
++        }
++        return;
++      }
++      if (type === 'mousemove') {
++        this._lastMousePosition = { x, y };
++        if (this._isDragging) {
++          const watcher = new EventWatcher(this._pageEventSink, ['dragover'], this._pendingEventWatchers);
++          await this._contentPage.send('dispatchDragEvent', { type: 'dragover', x, y, modifiers });
++          await watcher.ensureEventsAndDispose(['dragover']);
++          return;
++        }
++        const watcher = new EventWatcher(this._pageEventSink, ['dragstart', 'juggler-drag-finalized'], this._pendingEventWatchers);
++        await sendMouseEvent(type);
++        if (watcher.hasEvent('dragstart')) {
++          const eventObject = await watcher.ensureEvent('juggler-drag-finalized');
++          this._isDragging = eventObject.dragSessionStarted;
++        }
++        watcher.dispose();
++        return;
++      }
 +      if (this._isDragging) {
 +        const watcher = new EventWatcher(this._pageEventSink, ['dragover'], this._pendingEventWatchers);
 +        await this._contentPage.send('dispatchDragEvent', { type: 'dragover', x, y, modifiers });
++        await this._contentPage.send('dispatchDragEvent', { type: 'drop', x, y, modifiers });
++        await this._contentPage.send('dispatchDragEvent', { type: 'dragend', x, y, modifiers });
 +        await watcher.ensureEventsAndDispose(['dragover']);
++        this._isDragging = false;
 +        return;
 +      }
-+      const watcher = new EventWatcher(
-+        this._pageEventSink,
-+        ['dragstart', 'juggler-drag-finalized'],
-+        this._pendingEventWatchers
-+      );
 +      await sendMouseEvent(type);
-+      if (watcher.hasEvent('dragstart')) {
-+        const eventObject = await watcher.ensureEvent('juggler-drag-finalized');
-+        this._isDragging = eventObject.dragSessionStarted;
-+      }
-+      watcher.dispose();
-+      return;
++    }, { muteNotificationsPopup: true });
++  }
++
+   async ['Page.dispatchWheelEvent']({x, y, button, deltaX, deltaY, deltaZ, modifiers }) {
++    const host = this._pageTarget._uiHost;
++    if (host) {
++      return this._pageTarget.activateAndRun(() => {
++        const browser = this._pageTarget.linkedBrowser();
++        const win = host.windowTarget ? this._pageTarget._window : browser.ownerGlobal;
++        const rect = host.windowTarget ? { left: 0, top: 0 } : browser.getBoundingClientRect();
++        win.windowUtils.sendWheelEvent(x + rect.left, y + rect.top, deltaX, deltaY, deltaZ,
++          0, modifiers, Math.trunc(deltaX), Math.trunc(deltaY), 0);
++      });
 +    }
-+
-+    if (this._isDragging) {
-+      const watcher = new EventWatcher(this._pageEventSink, ['dragover'], this._pendingEventWatchers);
-+      await this._contentPage.send('dispatchDragEvent', { type: 'dragover', x, y, modifiers });
-+      await this._contentPage.send('dispatchDragEvent', { type: 'drop', x, y, modifiers });
-+      await this._contentPage.send('dispatchDragEvent', { type: 'dragend', x, y, modifiers });
-+      await watcher.ensureEventsAndDispose(['dragover']);
-+      this._isDragging = false;
-+      return;
-+    }
-+    await sendMouseEvent(type);
-+  }, { muteNotificationsPopup: true });
-+};
-+
-+
+     const deltaMode = 0; // WheelEvent.DOM_DELTA_PIXEL
+     const lineOrPageDeltaX = deltaX > 0 ? Math.floor(deltaX) : Math.ceil(deltaX);
+     const lineOrPageDeltaY = deltaY > 0 ? Math.floor(deltaY) : Math.ceil(deltaY);
+@@ -641,7 +816,7 @@
+   }
+ 
+   async ['Page.insertText'](options) {
+-    return await this._contentPage.send('insertText', options);
++    return await this._sendInput('insertText', options);
+   }
+ 
+   async ['Page.crash'](options) {
 diff --git a/omni.ja/chrome/juggler/content/content/PageAgent.js b/omni.ja/chrome/juggler/content/content/PageAgent.js
 --- a/omni.ja/chrome/juggler/content/content/PageAgent.js
 +++ b/omni.ja/chrome/juggler/content/content/PageAgent.js
-@@ -147,7 +147,7 @@
+@@ -12,9 +12,13 @@
+ const {NetUtil} = ChromeUtils.importESModule('resource://gre/modules/NetUtil.sys.mjs');
+ const {setTimeout} = ChromeUtils.importESModule('resource://gre/modules/Timer.sys.mjs');
+ 
+-const dragService = Cc["@mozilla.org/widget/dragservice;1"].getService(
+-  Ci.nsIDragService
+-);
++const dragService = (() => {
++  try {
++    return Cc["@mozilla.org/widget/dragservice;1"].getService(Ci.nsIDragService);
++  } catch (e) {
++    return { getCurrentSession: () => undefined };
++  }
++})();
+ const obs = Cc["@mozilla.org/observer-service;1"].getService(
+   Ci.nsIObserverService
+ );
+@@ -146,8 +150,12 @@
+         adoptNode: this._adoptNode.bind(this),
          crash: this._crash.bind(this),
          describeNode: this._describeNode.bind(this),
++        setUiTargetMetadata: metadata => {
++          this._frameTree.setUiTargetMetadata(metadata);
++        },
          dispatchKeyEvent: this._dispatchKeyEvent.bind(this),
--        dispatchDragEvent: this._dispatchDragEvent.bind(this),
-+        dispatchDragEvent: this._dispatchPopupMouseEvent.bind(this),
+         dispatchDragEvent: this._dispatchDragEvent.bind(this),
++        dispatchUiMouseEvent: this._dispatchUiMouseEvent.bind(this),
          dispatchTouchEvent: this._dispatchTouchEvent.bind(this),
          dispatchTapEvent: this._dispatchTapEvent.bind(this),
          getContentQuads: this._getContentQuads.bind(this),
-@@ -556,6 +556,108 @@
+@@ -556,6 +564,127 @@
      return domWindow ? dragService.getCurrentSession(domWindow) : undefined;
    }
  
 +
-+  async _dispatchPopupMouseEvent({type, x, y, button = 0, clickCount = 0, modifiers = 0, buttons = 0}) {
-+    if (!['mousedown', 'mousemove', 'mouseup'].includes(type))
++  async _dispatchUiMouseEvent({type, x, y, button = 0, clickCount = 0, modifiers = 0, buttons = 0}) {
++    if (!['mousedown', 'mousemove', 'mouseup', 'contextmenu'].includes(type))
 +      return this._dispatchDragEvent({ type, x, y, modifiers });
 +    const win = this._frameTree.mainFrame().domWindow();
++    if (!modifiers) {
++      // Widget-level synthesis in the target document: trusted events with user
++      // activation, delivered through this document's own presentation.
++      // Not awaited: in an extension popup's process the completion callback never fires.
++      win.synthesizeMouseEvent(type, x, y, {
++        identifier: win.windowUtils.DEFAULT_MOUSE_POINTER_ID,
++        button,
++        buttons,
++        clickCount,
++        modifiers,
++        pressure: 0.0,
++        inputSource: win.MouseEvent.MOZ_SOURCE_MOUSE,
++      }, {
++        isDOMEventSynthesized: true,
++        isWidgetEventSynthesized: false,
++        isAsyncEnabled: false,
++      });
++      return;
++    }
 +    const target = win.document.elementFromPoint(x, y) || win.document.documentElement;
 +    const eventOptions = {
 +      bubbles: true,
@@ -537,3 +1740,236 @@ diff --git a/omni.ja/chrome/juggler/content/content/PageAgent.js b/omni.ja/chrom
    async _dispatchDragEvent({type, x, y, modifiers}) {
      const session = this._getCurrentDragSession();
      const dropEffect = session.dataTransfer.dropEffect;
+diff --git a/omni.ja/chrome/juggler/content/components/Juggler.js b/omni.ja/chrome/juggler/content/components/Juggler.js
+--- a/omni.ja/chrome/juggler/content/components/Juggler.js
++++ b/omni.ja/chrome/juggler/content/components/Juggler.js
+@@ -40,6 +40,7 @@
+       },
+     },
+     allFrames: true,
++    includeChrome: true,
+     safeForUntrustedWebProcess: true,
+   },
+ });
+@@ -95,6 +96,7 @@
+         Services.obs.removeObserver(this, topic);
+ 
+         const targetRegistry = new TargetRegistry();
++        targetRegistry.registerBrowserChromeWindows();
+         new NetworkObserver(targetRegistry);
+ 
+         const loadStyleSheet = () => {
+diff --git a/omni.ja/chrome/juggler/content/content/main.js b/omni.ja/chrome/juggler/content/content/main.js
+--- a/omni.ja/chrome/juggler/content/content/main.js
++++ b/omni.ja/chrome/juggler/content/content/main.js
+@@ -6,8 +6,10 @@
+ // NOTE: since these have to exist in both Worker and main threads, and we do
+ // not know a way to load ES Modules in worker threads, we have to use the loadSubScript
+ // utility instead.
+-Services.scriptloader.loadSubScript('chrome://juggler/content/SimpleChannel.js');
+-Services.scriptloader.loadSubScript('chrome://juggler/content/content/Runtime.js');
++if (typeof SimpleChannel === 'undefined')
++  Services.scriptloader.loadSubScript('chrome://juggler/content/SimpleChannel.js');
++if (typeof Runtime === 'undefined')
++  Services.scriptloader.loadSubScript('chrome://juggler/content/content/Runtime.js');
+ 
+ const {Helper} = ChromeUtils.importESModule('chrome://juggler/content/Helper.js');
+ const {FrameTree} = ChromeUtils.importESModule('chrome://juggler/content/content/FrameTree.js');
+@@ -47,13 +49,27 @@
+   };
+ 
+   const contextCrossProcessCookie = Services.cpmm.sharedData.get('juggler:context-cookie-' + browsingContext.originAttributes.userContextId) || { initScripts: [], bindings: [], settings: {} };
+-  const pageCrossProcessCookie = Services.cpmm.sharedData.get('juggler:page-cookie-' + browsingContext.browserId) || { initScripts: [], bindings: [], interceptFileChooserDialog: false };
++  const pageCrossProcessCookie = Services.cpmm.sharedData.get('juggler:page-cookie-context-' + browsingContext.id) ||
++    Services.cpmm.sharedData.get('juggler:page-cookie-' + browsingContext.browserId) ||
++    { initScripts: [], bindings: [], interceptFileChooserDialog: false };
+ 
+   // Enforce focused state for all top level documents.
+   docShell.overrideHasFocus = true;
+   docShell.forceActiveState = true;
+   docShell.disallowBFCache = true;
+-  data.frameTree = new FrameTree(browsingContext);
++  data.frameTree = new FrameTree(browsingContext, docShell);
++  if (pageCrossProcessCookie.uiTargetMetadata)
++    data.frameTree.setUiTargetMetadata(pageCrossProcessCookie.uiTargetMetadata);
++  if (pageCrossProcessCookie.uiTargetMetadata &&
++      !pageCrossProcessCookie.uiTargetMetadata.kind?.startsWith('chrome-') &&
++      pageCrossProcessCookie.uiTargetMetadata.kind !== 'tab' &&
++      (docShell.domWindow.document.readyState === 'complete' || docShell.domWindow.document.readyState === 'interactive')) {
++    const mainFrame = data.frameTree.mainFrame();
++    mainFrame._docShell = docShell;
++    if (!mainFrame.mainExecutionContext())
++      mainFrame._onGlobalObjectCleared();
++    data.frameTree.forcePageReady();
++  }
+   for (const [name, value] of Object.entries(contextCrossProcessCookie.settings)) {
+     if (value !== undefined)
+       applySetting[name](value);
+diff --git a/omni.ja/chrome/juggler/content/content/Runtime.js b/omni.ja/chrome/juggler/content/content/Runtime.js
+--- a/omni.ja/chrome/juggler/content/content/Runtime.js
++++ b/omni.ja/chrome/juggler/content/content/Runtime.js
+@@ -53,9 +53,28 @@
+   'xbl javascript',
+ ]);
+ 
++let parentDebuggerConstructor;
++
++function createRuntimeDebugger(isWorker) {
++  if (isWorker || Services.appinfo.processType !== 0)
++    return new Debugger();
++  // Chrome windows share the system-module compartment. A Debugger cannot
++  // debug its own compartment, so keep its global separate from browser UI.
++  if (!parentDebuggerConstructor) {
++    const sandbox = Components.utils.Sandbox(Services.scriptSecurityManager.getSystemPrincipal(), {
++      freshCompartment: true,
++      invisibleToDebugger: true,
++    });
++    const { addDebuggerToGlobal } = ChromeUtils.importESModule('resource://gre/modules/jsdebugger.sys.mjs');
++    addDebuggerToGlobal(sandbox);
++    parentDebuggerConstructor = sandbox.Debugger;
++  }
++  return new parentDebuggerConstructor();
++}
++
+ class Runtime {
+   constructor(isWorker = false) {
+-    this._debugger = new Debugger();
++    this._debugger = createRuntimeDebugger(isWorker);
+     // A debuggee global with these flags unset is pinned to the debuggable wasm/asm.js
+     // baseline tier, with the optimizing compiler disabled entirely.
+     this._debugger.allowUnobservedWasm = true;
+@@ -458,7 +477,7 @@
+   }
+ 
+   _createRemoteObject(debuggerObj) {
+-    if (debuggerObj instanceof Debugger.Object) {
++    if (debuggerObj instanceof this._runtime._debugger.constructor.Object) {
+       const objectId = generateId();
+       this._remoteObjects.set(objectId, debuggerObj);
+       const rawObj = debuggerObj.unsafeDereference();
+diff --git a/omni.ja/chrome/juggler/content/protocol/BrowserHandler.js b/omni.ja/chrome/juggler/content/protocol/BrowserHandler.js
+--- a/omni.ja/chrome/juggler/content/protocol/BrowserHandler.js
++++ b/omni.ja/chrome/juggler/content/protocol/BrowserHandler.js
+@@ -107,16 +107,28 @@
+       target.startScreencast(target.browserContext().screencastOptions);
+   }
+ 
+-  _onTargetDestroyed(target) {
++  async _onTargetDestroyed(target) {
+     const session = this._attachedSessions.get(target);
+     if (!session)
+       return;
+     this._attachedSessions.delete(target);
++    // Let commands already running against the page answer before it detaches: an
++    // input event can close its own page, like a dialog button, and a reply that
++    // trails the detach is lost to the client.
++    await session.settle(1000);
++    // A key or button pressed when its page closed, like Enter on a dialog that closes on
++    // keydown, is still released by the client; let that release answer as well.
++    await session.settleHeldInput(500);
++    await session.settle(1000);
+     this._dispatcher.destroySession(session);
+-    this._session.emitEvent('Browser.detachedFromTarget', {
+-      sessionId: session.sessionId(),
+-      targetId: target.id(),
+-    });
++    try {
++      this._session.emitEvent('Browser.detachedFromTarget', {
++        sessionId: session.sessionId(),
++        targetId: target.id(),
++      });
++    } catch (e) {
++      // The connection closed while the commands settled.
++    }
+   }
+ 
+   _onDownloadCreated(downloadInfo) {
+diff --git a/omni.ja/chrome/juggler/content/protocol/Dispatcher.js b/omni.ja/chrome/juggler/content/protocol/Dispatcher.js
+--- a/omni.ja/chrome/juggler/content/protocol/Dispatcher.js
++++ b/omni.ja/chrome/juggler/content/protocol/Dispatcher.js
+@@ -5,6 +5,7 @@
+ const {protocol} = ChromeUtils.importESModule("chrome://juggler/content/protocol/Protocol.js");
+ const {checkScheme} = ChromeUtils.importESModule("chrome://juggler/content/protocol/PrimitiveTypes.js");
+ const {Helper} = ChromeUtils.importESModule('chrome://juggler/content/Helper.js');
++const {setTimeout, clearTimeout} = ChromeUtils.importESModule('resource://gre/modules/Timer.sys.mjs');
+ 
+ const helper = new Helper();
+ 
+@@ -48,10 +49,12 @@
+     const id = data.id;
+     const sessionId = data.sessionId;
+     delete data.sessionId;
++    let finishCommand;
+     try {
+       const session = sessionId ? this._sessions.get(sessionId) : this._rootSession;
+       if (!session)
+         throw new Error(`ERROR: cannot find session with id "${sessionId}"`);
++      finishCommand = session._trackCommand();
+       const method = data.method;
+       const params = data.params || {};
+       if (!id)
+@@ -82,6 +85,8 @@
+         message: e.message,
+         data: e.stack
+       }}));
++    } finally {
++      finishCommand?.();
+     }
+   }
+ 
+@@ -102,8 +107,36 @@
+     this._sessionId = sessionId;
+     this._dispatcher = dispatcher;
+     this._handler = null;
++    this._commands = new Set();
+   }
+ 
++  // Returns a callback that marks the command answered.
++  _trackCommand() {
++    const { promise, resolve } = Promise.withResolvers();
++    this._commands.add(promise);
++    return () => {
++      this._commands.delete(promise);
++      resolve();
++    };
++  }
++
++  // Resolves once the commands already running have been answered, or after timeoutMs.
++  async settle(timeoutMs) {
++    if (!this._commands.size)
++      return;
++    let timer;
++    await Promise.race([
++      Promise.all([...this._commands]),
++      new Promise(resolve => timer = setTimeout(resolve, timeoutMs)),
++    ]);
++    clearTimeout(timer);
++  }
++
++  // Resolves once keys and buttons held on the session's page are released, or after timeoutMs.
++  async settleHeldInput(timeoutMs) {
++    await this._handler?.heldInputReleased?.(timeoutMs);
++  }
++
+   sessionId() {
+     return this._sessionId;
+   }
+diff --git a/omni.ja/chrome/juggler/content/Helper.js b/omni.ja/chrome/juggler/content/Helper.js
+--- a/omni.ja/chrome/juggler/content/Helper.js
++++ b/omni.ja/chrome/juggler/content/Helper.js
+@@ -79,7 +79,14 @@
+ 
+   addProgressListener(progress, listener, flags) {
+     progress.addProgressListener(listener, flags);
+-    return () => progress.removeProgressListener(listener);
++    return () => {
++      try {
++        progress.removeProgressListener(listener);
++      } catch (e) {
++        // The web progress goes away with its docShell, e.g. when a window closes
++        // before the listener is removed. Nothing to remove then.
++      }
++    };
+   }
+ 
+   removeListeners(listeners) {

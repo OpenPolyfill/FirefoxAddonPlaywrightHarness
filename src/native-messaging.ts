@@ -102,33 +102,41 @@ export async function configureNativeMessagingDirectory(
 ): Promise<void> {
   const consoleActor = chromeTarget.console()
   await consoleActor.call('startListeners', { listeners: ['evaluationResult'] })
-  const configuredPath = await new RdpEvaluation(rdp, consoleActor).evaluate<string>(
-    (...args: unknown[]) => {
-      const directoryPath = args[0]
-      if (typeof directoryPath !== 'string')
-        throw new Error('Native manifest directory path is missing')
-      const localFileClass = Cc['@mozilla.org/file/local;1']
-      if (!localFileClass) throw new Error('Firefox local file service is unavailable')
-      const manifestDirectory = localFileClass.createInstance(Ci.nsIFile)
-      manifestDirectory.initWithPath(directoryPath)
-      Services.dirsvc.set('XREUserNativeManifests', manifestDirectory)
+  const evaluation = new RdpEvaluation(rdp, consoleActor)
+  let configuredPath: string
+  try {
+    configuredPath = await evaluation.evaluate<string>(
+      (...args: unknown[]) => {
+        const directoryPath = args[0]
+        if (typeof directoryPath !== 'string')
+          throw new Error('Native manifest directory path is missing')
+        const localFileClass = Cc['@mozilla.org/file/local;1']
+        if (!localFileClass) throw new Error('Firefox local file service is unavailable')
+        const manifestDirectory = localFileClass.createInstance(Ci.nsIFile)
+        manifestDirectory.initWithPath(directoryPath)
+        Services.dirsvc.set('XREUserNativeManifests', manifestDirectory)
 
-      const { NativeManifests } = ChromeUtils.importESModule(
-        'resource://gre/modules/NativeManifests.sys.mjs'
-      )
-      if (NativeManifests._initializePromise) {
-        throw new Error('NativeManifests initialized before the harness set its isolated directory')
-      }
-      const configuredDirectory = Services.dirsvc.get('XREUserNativeManifests', Ci.nsIFile).path
-      if (configuredDirectory !== directoryPath) {
-        throw new Error(`Firefox kept the native manifest directory at ${configuredDirectory}`)
-      }
-      return NativeManifests.init().then(
-        () => Services.dirsvc.get('XREUserNativeManifests', Ci.nsIFile).path
-      )
-    },
-    [manifestBaseDir]
-  )
+        const { NativeManifests } = ChromeUtils.importESModule(
+          'resource://gre/modules/NativeManifests.sys.mjs'
+        )
+        if (NativeManifests._initializePromise) {
+          throw new Error(
+            'NativeManifests initialized before the harness set its isolated directory'
+          )
+        }
+        const configuredDirectory = Services.dirsvc.get('XREUserNativeManifests', Ci.nsIFile).path
+        if (configuredDirectory !== directoryPath) {
+          throw new Error(`Firefox kept the native manifest directory at ${configuredDirectory}`)
+        }
+        return NativeManifests.init().then(
+          () => Services.dirsvc.get('XREUserNativeManifests', Ci.nsIFile).path
+        )
+      },
+      [manifestBaseDir]
+    )
+  } finally {
+    evaluation.dispose()
+  }
   if (configuredPath !== manifestBaseDir) {
     throw new Error(
       `Firefox initialized native manifests from an unexpected directory: ${configuredPath}`

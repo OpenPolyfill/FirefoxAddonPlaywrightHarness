@@ -10,17 +10,35 @@ const test = withSharedPage(
 
 test.describe.configure({ mode: 'serial' })
 
-test('retains browser context and page state across tests', async ({ context, page }) => {
+test('retains browser context, content page, and chrome target state across tests', async ({
+  context,
+  page,
+  chromePage
+}) => {
   await context.addCookies([
     { name: 'worker-context-state', value: 'persisted', url: 'http://localhost/' }
   ])
   await page.setContent('<body>worker page state</body>')
+  await chromePage.evaluate(() => {
+    document.documentElement.setAttribute('data-worker-fixture-state', 'retained')
+  })
 })
 
-test('reuses the same context and Page object', async ({ context, page }) => {
+test('reuses worker context, Page objects, and chrome window target', async ({
+  context,
+  page,
+  chromePage,
+  chromePages
+}) => {
   const cookies = await context.cookies('http://localhost/')
   expect(cookies).toContainEqual(
     expect.objectContaining({ name: 'worker-context-state', value: 'persisted' })
   )
   await expect(page.locator('body')).toHaveText('worker page state')
+  expect(
+    await chromePage.evaluate(() =>
+      document.documentElement.getAttribute('data-worker-fixture-state')
+    )
+  ).toBe('retained')
+  expect(await chromePages()).toContain(chromePage)
 })

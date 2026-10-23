@@ -17,6 +17,7 @@ Extensions without a background page or worker install normally; `extension.back
 - Explicit page contexts through `extension.isolatedContexts.get(page)`.
 - Browser action, page action, and extension sidebar activation as Playwright `Page` targets.
 - Popup and sidebar input, locators, screenshots, events, and close lifecycle through Playwright.
+- `chromePage` exposes the primary `browser.xhtml` window as a Playwright `Page`; embedded Firefox UI documents are also registered as Pages.
 - Idempotent Playwright Firefox patching for extension documents and experiment APIs.
 - Automatic capture of uncaught exceptions and error-level console messages from Firefox extension backgrounds, content scripts, and browser chrome, attached to failed tests.
 
@@ -110,6 +111,20 @@ test('background, isolated page, and browser action', async ({ page, extension }
 })
 ```
 
+The `chromePage` fixture is the primary Firefox `browser.xhtml` window, not a tab containing a browser UI URL. Use its normal Playwright locators and input APIs for menus, toolbars, prompts, and other DOM-backed browser UI. Call `chromePages()` to discover all currently open browser chrome windows, including additional windows opened during the test:
+
+```ts
+test('inspect Firefox chrome', async ({ chromePage, chromePages }) => {
+  expect(await chromePage.evaluate(() => document.documentURI)).toContain('browser.xhtml')
+  await expect(chromePage.locator('#PanelUI-menu-button')).toBeVisible()
+  expect(await chromePages()).toContain(chromePage)
+})
+```
+
+The exported `getFirefoxChromePages(context)` helper provides the same discovery behavior outside the fixture API.
+
+Panels, menus, and doorhangers of a chrome window are reached through that window's Page. Window-modal dialogs, sidebar panels, subdialogs of privileged pages such as `about:preferences`, and other embedded `<browser>` documents are separate Pages, while content `alert`/`confirm`/`prompt` stay Playwright `dialog` events.
+
 The `rdp` fixture exposes the connected `FirefoxRDP` client from `@openpolyfill/firefox-rdp` for low-level protocol access. See the [FirefoxRDP documentation](https://openpolyfill.github.io/FirefoxRDP) for the complete client and actor API:
 
 ```ts
@@ -127,6 +142,8 @@ The `extension` fixture includes:
 - `activateAction(page, kind)` and `waitForPopup()` — open or wait for an action popup. Pass `{ waitForPopup: false }` for click-only actions.
 - `activateSidebar(page)` — open the extension sidebar and return its Playwright `Page`.
 - `id`, `installPath`, and `close()` — extension identity and lifecycle.
+
+The Firefox fixtures also include `chromePage` for the primary browser chrome window and `chromePages()` for rediscovering all open browser chrome windows. Each is a real Playwright `Page`; use locators on `chromePage` for UI hosted in the same XUL document. Embedded privileged UI documents in separate `<browser>` elements are exposed as additional Pages, while ordinary iframes remain `Frame` objects.
 
 `extension.isolated` is bound to the fixture's current `page` and follows that page across navigations. Use `extension.isolatedContexts.get(otherPage)` when the evaluation must target a specific Playwright page:
 

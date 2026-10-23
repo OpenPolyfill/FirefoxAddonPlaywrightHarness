@@ -143,3 +143,18 @@ test('bounds storage, resets between tests, and removes RDP listeners on close',
   assert.equal(chrome.consoleActor.listenerCount('pageError'), 0)
   assert.equal(chrome.consoleActor.listenerCount('consoleAPICall'), 0)
 })
+
+test('closes promptly when a vanished target never answers', async () => {
+  const vanished = makeTarget('vanished', {
+    url: 'https://example.test/',
+    consoleActor: 'vanished-console'
+  })
+  const call = vanished.consoleActor.call.bind(vanished.consoleActor)
+  vanished.consoleActor.call = (method, params) =>
+    method === 'stopListeners' ? new Promise(() => {}) : call(method, params)
+  const diagnostics = new FirefoxErrorDiagnostics(makeSession([vanished.target]))
+  await diagnostics.start()
+  const started = Date.now()
+  await diagnostics.close()
+  assert.ok(Date.now() - started < 5000, 'close() waited for an actor that never answers')
+})

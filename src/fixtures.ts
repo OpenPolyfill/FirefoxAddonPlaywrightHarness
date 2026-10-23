@@ -1,4 +1,4 @@
-import type { Page, TestInfo, TestType, WorkerInfo } from '@playwright/test'
+import type { BrowserContext, Page, TestInfo, TestType, WorkerInfo } from '@playwright/test'
 import type { FirefoxRDP } from '@openpolyfill/firefox-rdp'
 import { bindFirefoxExtensionPage, launchFirefoxExtension } from './launch.js'
 import type { FirefoxExtension, FirefoxHarnessConfig, InternalFirefoxContext } from './types.js'
@@ -6,8 +6,52 @@ import type { FirefoxExtension, FirefoxHarnessConfig, InternalFirefoxContext } f
 export interface FirefoxFixtures {
   context: InternalFirefoxContext
   page: Page
+  chromePage: Page
+  chromePages: () => Promise<Page[]>
   extension: FirefoxExtension
   rdp: FirefoxRDP
+}
+const chromeTargetIdentityKey = '__openpolyfillFirefoxUiTarget'
+
+interface FirefoxUiTargetIdentity {
+  targetId: string
+  kind: string
+  primary?: boolean
+}
+
+async function pageTargetIdentity(page: Page): Promise<FirefoxUiTargetIdentity | null> {
+  try {
+    return await page.evaluate((key) => {
+      const identity = (window as unknown as Record<string, FirefoxUiTargetIdentity | undefined>)[
+        key
+      ]
+      return identity?.targetId && identity.kind ? identity : null
+    }, chromeTargetIdentityKey)
+  } catch {
+    return null
+  }
+}
+
+export async function getFirefoxChromePages(context: BrowserContext): Promise<Page[]> {
+  const pages = context.pages()
+  const identities = await Promise.all(pages.map((page) => pageTargetIdentity(page)))
+  return pages.filter((_, index) => identities[index]?.kind === 'chrome-window')
+}
+
+async function waitForPrimaryChromePage(context: BrowserContext): Promise<Page> {
+  const deadline = Date.now() + 15_000
+  while (Date.now() < deadline) {
+    const pages = context.pages()
+    const identities = await Promise.all(pages.map((page) => pageTargetIdentity(page)))
+    const primaryIndex = identities.findIndex(
+      (identity) => identity?.kind === 'chrome-window' && identity.primary
+    )
+    if (primaryIndex !== -1) return pages[primaryIndex]!
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  throw new Error(
+    'Firefox Juggler did not expose the primary browser chrome window as a Playwright Page within 15000ms'
+  )
 }
 
 interface WorkerFirefoxFixtures {
@@ -74,6 +118,15 @@ export function createFirefoxFixtures<
       { scope: 'worker' as const }
     ],
     context: contextFixture,
+    chromePage: async ({ context }: { context: InternalFirefoxContext }, use: FixtureUse<Page>) => {
+      await use(await waitForPrimaryChromePage(context))
+    },
+    chromePages: async (
+      { context }: { context: InternalFirefoxContext },
+      use: FixtureUse<() => Promise<Page[]>>
+    ) => {
+      await use(() => getFirefoxChromePages(context))
+    },
     extension: async (
       { context, page }: { context: InternalFirefoxContext; page: Page },
       use: FixtureUse<FirefoxExtension>
@@ -90,7 +143,9 @@ export function createFirefoxFixtures<
     },
     page: async ({ context }: { context: InternalFirefoxContext }, use: FixtureUse<Page>) => {
       await synchronizePostInstallTabs(context, firefoxHarnessConfig.postInstallPages ?? [])
-      const existing = context.pages().find((candidate) => candidate.url() === 'about:blank')
+      const blankPages = context.pages().filter((candidate) => candidate.url() === 'about:blank')
+      const identities = await Promise.all(blankPages.map(pageTargetIdentity))
+      const existing = blankPages.find((_, index) => identities[index]?.kind === 'tab')
       const page = existing ?? (await context.newPage())
       try {
         await use(page)

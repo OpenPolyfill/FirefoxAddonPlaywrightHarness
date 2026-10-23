@@ -1,6 +1,6 @@
 ---
 title: 'Fixtures and evaluation'
-description: 'Use the page-bound extension helpers, explicit page contexts, and raw RDP fixture.'
+description: 'Use page-bound helpers, Firefox chrome Pages, explicit page contexts, and raw RDP.'
 ---
 
 ## Fixture overview
@@ -11,6 +11,8 @@ description: 'Use the page-bound extension helpers, explicit page contexts, and 
 - `page` — the current test page.
 - `extension` — the installed extension handle.
 - `rdp` — the connected `FirefoxRDP` client from `@openpolyfill/firefox-rdp`.
+- `chromePage` — the primary Firefox `browser.xhtml` window as a Playwright `Page`.
+- `chromePages()` — returns the currently open browser chrome Pages.
 
 ## Context and page lifetime
 
@@ -36,6 +38,43 @@ test.describe.configure({ mode: 'serial' })
 The factory's `context` fixture forwards the same worker context to each test. Without `withSharedPage`, its `page` fixture reuses a blank page and resets it to `about:blank` after each test. `withSharedPage` instead provides the same `Page` object to every test. That page retains DOM state until it is navigated or reset, and callers must not close it before the worker finishes.
 
 `resolveProjectOptions` maps Playwright `project.use` settings to Firefox launch options when a context is created. It runs once per test context or once per worker context, according to `contextScope`.
+
+## Browser chrome and embedded UI
+
+`chromePage` targets Firefox's actual primary `browser.xhtml` document. It is a regular Playwright `Page`, so use its locators, evaluation, mouse, keyboard, and screenshot APIs for menus, toolbars, doorhangers, and other UI in that chrome document.
+
+Call `chromePages()` each time you need the current set; it includes additional browser windows opened after fixture setup. Outside the fixtures, `getFirefoxChromePages(context)` provides the same discovery API. Privileged documents hosted by separate embedded `<browser>` elements are exposed as additional `Page` targets. Ordinary iframes remain `Frame` objects.
+
+```ts
+test('inspect browser chrome', async ({ chromePage, chromePages }) => {
+  expect(await chromePage.evaluate(() => document.documentURI)).toContain('browser.xhtml')
+  await expect(chromePage.locator('#PanelUI-menu-button')).toBeVisible()
+  expect(await chromePages()).toContain(chromePage)
+})
+```
+
+How Firefox UI maps to Pages:
+
+- **Panels and menus of a chrome window** (the application menu, context menus, doorhangers such as the bookmark and permission panels) belong to that window's Page. Locators and input reach open XUL popups even though they are drawn in their own widgets.
+- **Context menus** opened through `chromePage` remain available for clicking their items or dismissing with `Escape`. To operate a tab's native content menu, right-click through `chromePage.mouse` at the content's coordinates relative to the chrome window. Right-clicking through the tab Page retains upstream Playwright behavior, which dismisses the native menu.
+- **Window-modal dialogs** (for example `Services.prompt` with a browser window as parent) are separate Pages at `chrome://global/content/commonDialog.xhtml`. A click or key press that closes the dialog completes normally and the Page emits `close`.
+- **Content prompts** (`alert`, `confirm`, `prompt` from a page) stay Playwright `dialog` events of that page.
+- **Sidebar panels**, such as bookmarks, history, or an extension sidebar, are Pages while the sidebar is open and close with it.
+- **Subdialogs of privileged pages**, such as the dialogs of `about:preferences`, are Pages owned by their tab.
+- **Embedded `<browser>` documents** keep their Page across navigations, including ones that move the browser to another process. Replacing the `<browser>` element closes its Page and creates a new one.
+
+A `page` event for embedded UI can arrive while the Page still reports its initial `about:blank`, as with popups; wait for the document you expect:
+
+```ts
+await page.goto('about:preferences')
+const opened = context.waitForEvent('page')
+await page.evaluate(() =>
+  gSubDialog.open('chrome://browser/content/preferences/dialogs/connection.xhtml')
+)
+const subdialog = await opened
+await subdialog.waitForURL('chrome://browser/content/preferences/dialogs/connection.xhtml')
+await subdialog.locator('#networkProxyType radio[value="1"]').click()
+```
 
 ## Automatic Firefox error diagnostics
 

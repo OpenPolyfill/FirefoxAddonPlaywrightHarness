@@ -10,6 +10,8 @@ See [Generated API](/docs/api/reference) for TypeDoc pages generated from `src/i
 ## Main entry points
 
 - `createFirefoxFixtures(test, config)` — extend Playwright with the harness fixtures.
+- `chromePage` — automate the primary Firefox browser chrome window as a Playwright `Page`.
+- `chromePages()` and `getFirefoxChromePages(context)` — discover the currently open browser chrome Pages.
 - `extension.background` — evaluate in the extension background context.
 - `extension.isolated` — evaluate in the current fixture page.
 - `extension.isolatedContexts.get(page)` — evaluate in an explicitly selected page.

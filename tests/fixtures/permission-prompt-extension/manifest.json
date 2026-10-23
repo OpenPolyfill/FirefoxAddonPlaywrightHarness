@@ -1,0 +1,10 @@
+{
+  "manifest_version": 2,
+  "name": "Harness permission prompt fixture",
+  "version": "1.0",
+  "browser_action": {
+    "default_title": "Request permission",
+    "default_popup": "popup.html"
+  },
+  "optional_permissions": ["notifications"]
+}

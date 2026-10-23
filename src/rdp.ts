@@ -1,4 +1,4 @@
-import { ActorFront, FirefoxRDP, TargetFront, type RDPResponse } from '@openpolyfill/firefox-rdp'
+import { ActorFront, FirefoxRDP, TargetFront } from '@openpolyfill/firefox-rdp'
 import { readExtensionManifest } from './extension-package.js'
 
 export type PacketRecord = Record<string, unknown>
@@ -28,16 +28,46 @@ async function resolveValue(rdp: FirefoxRDP, value: unknown): Promise<unknown> {
 export class RdpEvaluation {
   private queue = Promise.resolve()
   private readonly results = new Map<string, PacketRecord>()
+  private readonly pending = new Map<
+    string,
+    { resolve: (packet: PacketRecord) => void; reject: (error: Error) => void }
+  >()
+  private readonly shutdown = Promise.withResolvers<never>()
+  private disposed = false
+  private evaluating = false
+  private readonly onPacket = (packet: unknown) => {
+    const item = record(packet)
+    if (
+      !this.evaluating ||
+      item?.from !== this.consoleActor.actorId ||
+      item.type !== 'evaluationResult' ||
+      typeof item.resultID !== 'string'
+    )
+      return
+    const waiter = this.pending.get(item.resultID)
+    if (waiter) waiter.resolve(item)
+    else this.results.set(item.resultID, item)
+  }
+  private readonly onClose = () => this.dispose()
 
   constructor(
     private readonly rdp: FirefoxRDP,
     private readonly consoleActor: ActorFront
   ) {
-    this.rdp.on('packet', (packet: unknown) => {
-      const item = record(packet)
-      if (item?.type === 'evaluationResult' && typeof item.resultID === 'string')
-        this.results.set(item.resultID, item)
-    })
+    this.shutdown.promise.catch(() => undefined)
+    this.rdp.on('packet', this.onPacket)
+    this.rdp.on('close', this.onClose)
+  }
+
+  dispose(): void {
+    if (this.disposed) return
+    this.disposed = true
+    this.rdp.off('packet', this.onPacket)
+    this.rdp.off('close', this.onClose)
+    this.results.clear()
+    const error = new Error('Firefox RDP evaluator is disposed')
+    for (const waiter of this.pending.values()) waiter.reject(error)
+    this.shutdown.reject(error)
   }
 
   evaluate<R = unknown>(
@@ -45,31 +75,38 @@ export class RdpEvaluation {
     args: unknown[] = []
   ): Promise<R> {
     const run = this.queue.then(async () => {
-      const body =
-        typeof pageFunction === 'string'
-          ? pageFunction
-          : `(${pageFunction.toString()})(${args.map((arg) => JSON.stringify(arg) ?? 'undefined').join(',')})`
-      const expression = `(async()=>{try{const __value__=await (${body});return JSON.stringify({__ok__:true,__value__:__value__})}catch(error){return JSON.stringify({__ok__:false,__error__:String(error&&error.message||error)})}})()`
-      const response = await this.consoleActor.call('evaluateJSAsync', {
-        text: expression,
-        mapped: { await: true }
-      })
-      const resultId = stringField(response, 'resultID')
-      if (!resultId) throw new Error('RDP evaluateJSAsync did not return a resultID')
-      const event = await this.waitForEvaluationResult(resultId)
-      if (event.hasException) {
-        const message = await resolveValue(this.rdp, event.exceptionMessage)
-        throw new Error(`Firefox evaluation failed: ${String(message)}`)
+      if (this.disposed) throw new Error('Firefox RDP evaluator is disposed')
+      this.evaluating = true
+      try {
+        const body =
+          typeof pageFunction === 'string'
+            ? pageFunction
+            : `(${pageFunction.toString()})(${args.map((arg) => JSON.stringify(arg) ?? 'undefined').join(',')})`
+        const expression = `(async()=>{try{const __value__=await (${body});return JSON.stringify({__ok__:true,__value__:__value__})}catch(error){return JSON.stringify({__ok__:false,__error__:String(error&&error.message||error)})}})()`
+        const response = await Promise.race([
+          this.consoleActor.call('evaluateJSAsync', { text: expression, mapped: { await: true } }),
+          this.shutdown.promise
+        ])
+        const resultId = stringField(response, 'resultID')
+        if (!resultId) throw new Error('RDP evaluateJSAsync did not return a resultID')
+        const event = await this.waitForEvaluationResult(resultId)
+        if (event.hasException) {
+          const message = await resolveValue(this.rdp, event.exceptionMessage)
+          throw new Error(`Firefox evaluation failed: ${String(message)}`)
+        }
+        const raw = await resolveValue(this.rdp, event.result)
+        if (typeof raw !== 'string')
+          throw new Error('Firefox evaluation returned a non-serializable result')
+        const parsed = record(JSON.parse(raw))
+        if (!parsed?.__ok__)
+          throw new Error(
+            `Firefox evaluation failed: ${String(parsed?.__error__ ?? 'unknown error')}`
+          )
+        return parsed.__value__ as R
+      } finally {
+        this.evaluating = false
+        this.results.clear()
       }
-      const raw = await resolveValue(this.rdp, event.result)
-      if (typeof raw !== 'string')
-        throw new Error('Firefox evaluation returned a non-serializable result')
-      const parsed = record(JSON.parse(raw))
-      if (!parsed?.__ok__)
-        throw new Error(
-          `Firefox evaluation failed: ${String(parsed?.__error__ ?? 'unknown error')}`
-        )
-      return parsed.__value__ as R
     })
     this.queue = run.then(
       () => undefined,
@@ -94,27 +131,24 @@ export class RdpEvaluation {
     }
   }
 
-  private waitForEvaluationResult(resultId: string): Promise<PacketRecord> {
+  private async waitForEvaluationResult(resultId: string): Promise<PacketRecord> {
+    if (this.disposed) throw new Error('Firefox RDP evaluator is disposed')
     const existing = this.results.get(resultId)
     if (existing) {
       this.results.delete(resultId)
-      return Promise.resolve(existing)
+      return existing
     }
     const { promise, resolve, reject } = Promise.withResolvers<PacketRecord>()
+    this.pending.set(resultId, { resolve, reject })
     const timer = setTimeout(() => {
-      this.rdp.off('packet', onPacket)
       reject(new Error(`Timed out waiting for RDP evaluation result ${resultId}`))
     }, this.rdp.requestTimeoutMs)
-    const onPacket = (packet: unknown) => {
-      const item = record(packet)
-      if (item?.type !== 'evaluationResult' || item.resultID !== resultId) return
+    try {
+      return await promise
+    } finally {
       clearTimeout(timer)
-      this.rdp.off('packet', onPacket)
-      this.results.delete(resultId)
-      resolve(item)
+      this.pending.delete(resultId)
     }
-    this.rdp.on('packet', onPacket)
-    return promise
   }
 }
 export class RdpInspectedWindowEvaluation {
@@ -212,12 +246,16 @@ export interface InstalledExtension {
 export class FirefoxRdpSession {
   readonly targets: TargetFront[] = []
   chromeTarget: TargetFront | undefined
-  private readonly targetWaiters = new Set<(target: TargetFront) => void>()
+  private readonly targetWaiters = new Map<(target: TargetFront) => void, () => void>()
+  private closed = false
+  private readonly onPacket = (packet: unknown) => this.handlePacket(packet)
+  private readonly onClose = () => this.dispose()
   private constructor(
     readonly rdp: FirefoxRDP,
     readonly addonsActor: string
   ) {
-    this.rdp.on('packet', (packet: unknown) => this.handlePacket(packet))
+    this.rdp.on('packet', this.onPacket)
+    this.rdp.on('close', this.onClose)
   }
 
   static async connect(port: number): Promise<FirefoxRdpSession> {
@@ -339,25 +377,48 @@ export class FirefoxRdpSession {
     predicate: (target: TargetFront) => boolean,
     timeoutMs = 10_000
   ): Promise<TargetFront> {
+    if (this.closed) return Promise.reject(new Error('Firefox RDP session is closed'))
     const existing = this.targets.find(predicate)
     if (existing) return Promise.resolve(existing)
     const { promise, resolve, reject } = Promise.withResolvers<TargetFront>()
-    const waiter = (target: TargetFront) => {
-      if (!predicate(target)) return
+    const cleanup = () => {
       this.targetWaiters.delete(waiter)
       clearTimeout(timer)
-      resolve(target)
+    }
+    const waiter = (target: TargetFront) => {
+      try {
+        if (!predicate(target)) return
+        cleanup()
+        resolve(target)
+      } catch (error) {
+        cleanup()
+        reject(error)
+      }
     }
     const timer = setTimeout(() => {
-      this.targetWaiters.delete(waiter)
+      cleanup()
       reject(new Error(`Timed out waiting for Firefox target after ${timeoutMs}ms`))
     }, timeoutMs)
-    this.targetWaiters.add(waiter)
+    this.targetWaiters.set(waiter, () => {
+      cleanup()
+      reject(new Error('Firefox RDP session is closed'))
+    })
     return promise
   }
 
   close(): void {
+    this.dispose()
     this.rdp.close()
+  }
+
+  private dispose(): void {
+    if (this.closed) return
+    this.closed = true
+    this.rdp.off('packet', this.onPacket)
+    this.rdp.off('close', this.onClose)
+    for (const cancel of [...this.targetWaiters.values()]) cancel()
+    this.targets.length = 0
+    this.chromeTarget = undefined
   }
 
   private targetFromForm(value: unknown): TargetFront {
@@ -375,21 +436,23 @@ export class FirefoxRdpSession {
 
   private handlePacket(packet: unknown): void {
     const item = record(packet)
-    if (!item || item.type !== 'target-available-form') return
-    const form = record(item.target)
-    const actor = stringField(form, 'actor')
-    if (!form || !actor) return
-    const current = this.rdp.actor(actor)
-    const target =
-      current instanceof TargetFront
-        ? ((current.form = form), current)
-        : this.rdp.track(new TargetFront(this.rdp, actor, form))
-    if (!this.targets.some((candidate) => candidate.actorId === actor)) this.targets.push(target)
-    for (const waiter of [...this.targetWaiters]) waiter(target)
+    const actor = stringField(item?.target, 'actor')
+    if (!item || !actor) return
+    if (item.type === 'target-destroyed-form') {
+      this.removeTarget(actor)
+    } else if (item.type === 'target-available-form') {
+      const target = this.targetFromForm(item.target)
+      for (const waiter of [...this.targetWaiters.keys()]) waiter(target)
+    }
   }
+  private removeTarget(actorId: string): void {
+    const index = this.targets.findIndex((target) => target.actorId === actorId)
+    if (index !== -1) this.targets.splice(index, 1)
+    if (this.chromeTarget?.actorId === actorId) this.chromeTarget = undefined
+  }
+
   private attachWatcher(watcher: ActorFront): void {
     watcher.registerEvents('target-available-form', 'target-destroyed-form')
-    watcher.on('target-available-form', (packet: RDPResponse) => this.handlePacket(packet))
   }
 }
 

@@ -1,5 +1,6 @@
 import type { RDPResponse, TargetFront, WebConsoleFront } from '@openpolyfill/firefox-rdp'
 import type { FirefoxRdpSession } from './rdp.js'
+import { bounded } from './cleanup.js'
 
 export interface FirefoxErrorDiagnostic {
   timestamp: string
@@ -205,14 +206,20 @@ export class FirefoxErrorDiagnostics {
     if (this.closed) return
     const registrations = [...this.registrations.values()]
     this.disposeListeners()
-    await Promise.all(
-      registrations.map((registration) =>
-        registration.startedListeners.length
-          ? registration.console
-              .call('stopListeners', { listeners: registration.startedListeners })
-              .catch(() => undefined)
-          : Promise.resolve()
-      )
+    // Courtesy cleanup before the connection closes. Actors of targets that went away
+    // without a destroyed form, e.g. when a tab moved to another process, never answer.
+    await bounded(
+      Promise.all(
+        registrations.map((registration) =>
+          registration.startedListeners.length
+            ? registration.console
+                .call('stopListeners', { listeners: registration.startedListeners })
+                .catch(() => undefined)
+            : Promise.resolve()
+        )
+      ),
+      1000,
+      []
     )
   }
 
