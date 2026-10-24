@@ -1,0 +1,14 @@
+{
+  "manifest_version": 2,
+  "name": "Local Mode webRequest test fixture",
+  "version": "1.0",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "web-request-local-mode@test.mozilla.org"
+    }
+  },
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "permissions": ["webRequest", "webRequestBlocking", "https://web-request.localhost/*"]
+}
