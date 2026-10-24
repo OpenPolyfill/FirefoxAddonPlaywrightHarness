@@ -144,6 +144,8 @@ test('manage extension lifecycles', async ({ extensions }) => {
 
 Use `extensions.has(id)`, `extensions.get(id)`, `values()`, and the other read-only Map methods to inspect membership. `extensions.install(path)` installs an unpacked directory or packed XPI into the running Firefox instance and returns its handle.
 
+Installing another source with an ID already in `extensions` follows Firefox's native temporary-addon replacement behavior and returns the existing handle without changing collection membership.
+
 Each `FirefoxExtension` handle provides:
 
 - `id` and `installPath` — the installed extension identity and source path (directory or XPI).

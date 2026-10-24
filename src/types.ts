@@ -95,7 +95,8 @@ export interface FirefoxExtension {
   readonly background?: FirefoxBackground
   readonly isolated: FirefoxIsolated
   readonly isolatedContexts: FirefoxIsolatedContexts
-  readonly installPath: string
+  /** Current directory or XPI source path; updated when the extension is replaced. */
+  installPath: string
   activateAction(page: Page, kind?: ActionKind): Promise<Page>
   activateAction(page: Page, kind: ActionKind, options: { waitForPopup: false }): Promise<void>
   activateSidebar(page: Page): Promise<Page>

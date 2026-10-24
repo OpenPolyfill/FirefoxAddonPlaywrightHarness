@@ -143,6 +143,9 @@ The `extensions` fixture exposes the installed extensions as a read-only Map-lik
 - `extensions.values().next().value!` selects the first extension when its ID is unknown.
 - `extensions.install(path)` installs a directory or XPI at runtime and returns its handle.
 - Each handle exposes `background`, `isolated`, `isolatedContexts.get(page)`, `activateAction(page, kind)`, `waitForPopup()`, `activateSidebar(page)`, `reload()`, `enable()`, `disable()`, `uninstall()`, `id`, and `installPath`.
+
+Installing another directory or XPI with an ID already in `extensions` follows Firefox's temporary-addon replacement behavior and returns the existing handle; the collection size stays unchanged.
+
 - `uninstall()` removes the extension from Firefox and from the collection. `close()` is also available on the handle and uninstalls that extension.
 
 For example, use `extensions.get('example@example.org')!` to select a specific extension, then call its lifecycle methods. Handles retain their identity across reload, disable, and enable.

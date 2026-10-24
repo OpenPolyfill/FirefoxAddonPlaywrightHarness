@@ -240,6 +240,7 @@ export interface InstalledExtension {
   id: string
   addonActor: string
   manifest: Record<string, unknown>
+  enabled: boolean
   backgroundTarget?: TargetFront
   background?: RdpEvaluation
   watcher: ActorFront
@@ -342,24 +343,30 @@ export class FirefoxRdpSession {
 
   async installExtension(
     path: string,
-    onInstalled?: (extensionId: string) => void
+    onInstalled?: (extensionId: string) => boolean | void,
+    preserveExistingOnFailure = false
   ): Promise<InstalledExtension> {
     const manifest = await readExtensionManifest(path)
     const installed = await this.installTemporaryAddon(path)
+    let preserveExisting = preserveExistingOnFailure
     try {
-      onInstalled?.(installed.id)
+      preserveExisting = onInstalled?.(installed.id) === true || preserveExisting
+      const enabled = await this.isAddonEnabled(installed.id)
       const watcher = await this.watchAddonActor(installed.id, installed.actor)
-      const background = await this.waitForExtensionBackground(installed.id, manifest)
+      const background = enabled
+        ? await this.waitForExtensionBackground(installed.id, manifest)
+        : undefined
       return {
         id: installed.id,
         addonActor: installed.actor,
         manifest,
+        enabled,
         backgroundTarget: background?.target,
         background: background?.evaluator,
         watcher
       }
     } catch (error) {
-      await this.uninstallAddon(installed.id).catch(() => undefined)
+      if (!preserveExisting) await this.uninstallAddon(installed.id).catch(() => undefined)
       throw error
     }
   }
@@ -415,6 +422,51 @@ export class FirefoxRdpSession {
       }
     })()`)
   }
+  async isAddonEnabled(addonId: string): Promise<boolean> {
+    return this.evaluateChrome<boolean>(`(async () => {
+      const { AddonManager } = ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs')
+      const addon = await AddonManager.getAddonByID(${JSON.stringify(addonId)})
+      return addon?.isActive === true
+    })()`)
+  }
+
+  async reloadExtension(
+    addonId: string,
+    path: string,
+    wasEnabled: boolean,
+    previousConsoleActor?: string
+  ): Promise<InstalledExtension> {
+    const addon = (await this.listAddons()).find((candidate) => candidate.id === addonId)
+    if (!addon) throw new Error(`Firefox extension ${addonId} is not installed`)
+    await this.rdp.front(addon.actor, 'webExtensionDescriptor').api.reload()
+    const manifest = await readExtensionManifest(path)
+    const hasBackgroundPage = hasBackground(manifest)
+    let enabled = await this.isAddonEnabled(addonId)
+    if (enabled !== wasEnabled) {
+      await this.setAddonEnabled(addonId, wasEnabled, hasBackgroundPage)
+      enabled = await this.isAddonEnabled(addonId)
+    }
+    if (enabled !== wasEnabled)
+      throw new Error(
+        `Firefox extension ${addonId} did not preserve its enabled state during reload`
+      )
+    const refreshedAddon = (await this.listAddons()).find((candidate) => candidate.id === addonId)
+    if (!refreshedAddon) throw new Error(`Firefox extension ${addonId} disappeared during reload`)
+    const watcher = await this.watchAddonActor(addonId, refreshedAddon.actor)
+    const background =
+      enabled && hasBackgroundPage
+        ? await this.waitForExtensionBackground(addonId, manifest, previousConsoleActor)
+        : undefined
+    return {
+      id: addonId,
+      addonActor: refreshedAddon.actor,
+      manifest,
+      enabled,
+      backgroundTarget: background?.target,
+      background: background?.evaluator,
+      watcher
+    }
+  }
 
   async uninstallAddon(addonId: string): Promise<void> {
     await this.rdp.actor(this.addonsActor).call('uninstallAddon', { addonId })
@@ -427,10 +479,10 @@ export class FirefoxRdpSession {
     this.addonActors.delete(addonId)
   }
 
-  async refreshExtensionTargets(addonId: string): Promise<void> {
+  async refreshExtensionTargets(addonId: string, force = false): Promise<void> {
     const installed = (await this.listAddons()).find((addon) => addon.id === addonId)
     if (!installed) throw new Error(`Firefox extension ${addonId} is not installed`)
-    if (this.addonActors.get(addonId) === installed.actor) return
+    if (!force && this.addonActors.get(addonId) === installed.actor) return
     await this.watchAddonActor(addonId, installed.actor)
   }
   private async backgroundBrowsingContextId(addonId: string): Promise<number | undefined> {

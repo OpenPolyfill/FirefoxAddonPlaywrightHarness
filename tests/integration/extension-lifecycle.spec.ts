@@ -1,3 +1,7 @@
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import JSZip from 'jszip'
 import { baseTest, expect } from './fixtures.js'
 import { createFirefoxFixtures } from '../../src/fixtures.js'
 import type { FirefoxExtension } from '../../src/types.js'
@@ -13,6 +17,12 @@ const test = createFirefoxFixtures(baseTest, {
   extensionPaths: [lifecycleOne, lifecycleTwo],
   headless: true
 })
+async function setManifestVersion(extensionPath: string, version: string): Promise<void> {
+  const manifestPath = join(extensionPath, 'manifest.json')
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+  manifest.version = version
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2))
+}
 
 test('controls extension lifecycles independently and invalidates stale contexts', async ({
   extensions,
@@ -58,6 +68,10 @@ test('controls extension lifecycles independently and invalidates stale contexts
   expect(first.background).toBeUndefined()
   await expect(beforeDisable.evaluate('browser.runtime.id')).rejects.toThrow(/disposed/)
   expect(second.background).toBe(secondBackground)
+  await first.reload()
+  expect(first.background).toBeUndefined()
+  expect(extensions.get(first.id)).toBe(first)
+  expect(second.background).toBe(secondBackground)
 
   await first.enable()
   expect(extensions.get(first.id)).toBe(first)
@@ -68,6 +82,89 @@ test('controls extension lifecycles independently and invalidates stale contexts
   await first.uninstall()
   expect(extensions.has(first.id)).toBe(false)
   expect(extensions.get(second.id)).toBe(second)
+})
+
+test('replaces the same Gecko ID from a directory and XPI while preserving its handle', async ({
+  extensions,
+  page
+}) => {
+  const extension = extensions.get('lifecycle-one@example.org')
+  const sibling = extensions.get('lifecycle-two@example.org')
+  if (!extension || !sibling?.background || !extension.background)
+    throw new Error('Replacement fixtures must expose both background contexts')
+  const siblingBackground = sibling.background
+  const collectionSize = extensions.size
+  await page.route('https://replacement.example/**', (route) =>
+    route.fulfill({ contentType: 'text/html', body: '<main>Replacement page</main>' })
+  )
+  await page.goto('https://replacement.example/')
+  const staleIsolatedBeforeDirectory = extension.isolated
+  expect(await staleIsolatedBeforeDirectory.evaluate('location.hostname')).toBe(
+    'replacement.example'
+  )
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'firefox-elc-replacement-'))
+
+  try {
+    const directoryReplacement = join(temporaryDirectory, 'directory')
+    await cp(lifecycleOne, directoryReplacement, { recursive: true })
+    await setManifestVersion(directoryReplacement, '2.0')
+
+    const staleBeforeDirectory = extension.background
+    const popup = await extension.activateAction(page, 'browserAction')
+    const directoryHandle = await extensions.install(directoryReplacement)
+    expect(directoryHandle).toBe(extension)
+    expect(extensions.get(extension.id)).toBe(extension)
+    expect(extensions.size).toBe(collectionSize)
+    expect(extension.installPath).toBe(directoryReplacement)
+    expect(popup.isClosed()).toBe(true)
+    await expect(staleBeforeDirectory.evaluate('browser.runtime.id')).rejects.toThrow(/disposed/)
+    await expect(staleIsolatedBeforeDirectory.evaluate('location.hostname')).rejects.toThrow(
+      /stale/
+    )
+    expect(await extension.background!.evaluate('browser.runtime.getManifest().version')).toBe(
+      '2.0'
+    )
+
+    const staleBeforeReload = extension.background
+    await setManifestVersion(directoryReplacement, '2.1')
+    const reloadOperation = extension.reload()
+    const replacementOperation = extensions.install(directoryReplacement)
+    const [, concurrentReplacement] = await Promise.all([reloadOperation, replacementOperation])
+    expect(concurrentReplacement).toBe(extension)
+    expect(extensions.size).toBe(collectionSize)
+    await expect(staleBeforeReload!.evaluate('browser.runtime.id')).rejects.toThrow(/disposed/)
+    expect(await extension.background!.evaluate('browser.runtime.getManifest().version')).toBe(
+      '2.1'
+    )
+
+    const staleIsolatedBeforeXpi = extension.isolated
+    expect(await staleIsolatedBeforeXpi.evaluate('location.hostname')).toBe('replacement.example')
+    await setManifestVersion(directoryReplacement, '3.0')
+    const archive = new JSZip()
+    for (const filename of ['manifest.json', 'background.js', 'popup.html'])
+      archive.file(filename, await readFile(join(directoryReplacement, filename)))
+    const xpiReplacement = join(temporaryDirectory, 'replacement.xpi')
+    await writeFile(xpiReplacement, await archive.generateAsync({ type: 'nodebuffer' }))
+
+    const staleBeforeXpi = extension.background
+    const replacementPopup = await extension.activateAction(page, 'browserAction')
+    const xpiHandle = await extensions.install(xpiReplacement)
+    expect(xpiHandle).toBe(extension)
+    expect(extensions.get(extension.id)).toBe(extension)
+    expect(extensions.size).toBe(collectionSize)
+    expect(extension.installPath).toBe(xpiReplacement)
+    expect(replacementPopup.isClosed()).toBe(true)
+    await expect(staleBeforeXpi!.evaluate('browser.runtime.id')).rejects.toThrow(/disposed/)
+    await expect(staleIsolatedBeforeXpi.evaluate('location.hostname')).rejects.toThrow(/stale/)
+    expect(await extension.background!.evaluate('browser.runtime.getManifest().version')).toBe(
+      '3.0'
+    )
+    expect(sibling.background).toBe(siblingBackground)
+    expect(await sibling.background.evaluate('browser.runtime.id')).toBe(sibling.id)
+  } finally {
+    if (extensions.has(extension.id)) await extension.uninstall().catch(() => undefined)
+    await rm(temporaryDirectory, { recursive: true, force: true })
+  }
 })
 
 test('installs and uninstalls directories and XPI files at runtime', async ({ extensions }) => {

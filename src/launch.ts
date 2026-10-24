@@ -7,6 +7,7 @@ import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
 import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
 import { FirefoxRdpSession, RdpEvaluation, type InstalledExtension } from './rdp.js'
 import { FirefoxErrorDiagnostics } from './diagnostics.js'
+import { readExtensionManifest } from './extension-package.js'
 import {
   configureNativeMessagingDirectory,
   prepareNativeMessagingHosts
@@ -56,6 +57,18 @@ function launchOptions(config: FirefoxHarnessConfig, port: number): LaunchOption
     args: [...suppliedArgs, ...(config.args ?? []), `-start-debugger-server=${port}`],
     executablePath: firefox.executablePath()
   } as LaunchOptions
+}
+function objectRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined
+}
+
+function manifestGeckoId(manifest: Record<string, unknown>): string | undefined {
+  const gecko =
+    objectRecord(objectRecord(manifest.browser_specific_settings)?.gecko) ??
+    objectRecord(objectRecord(manifest.applications)?.gecko)
+  return typeof gecko?.id === 'string' && gecko.id ? gecko.id : undefined
 }
 export async function launchFirefoxExtension(
   config: FirefoxHarnessConfig
@@ -241,44 +254,53 @@ class FirefoxExtensionCollection implements FirefoxExtensions {
   }
 
   private async installOne(path: string): Promise<FirefoxExtension> {
+    const samePathHandle = [...this.handles.values()].find(
+      (extension) => extension.installPath === path
+    )
+    if (samePathHandle) return samePathHandle.replaceFromPath(path)
+    const declaredId = manifestGeckoId(await readExtensionManifest(path))
+    const declaredHandle = declaredId ? this.handles.get(declaredId) : undefined
+    if (declaredHandle) return declaredHandle.replaceFromPath(path)
+
     let registeredId: string | undefined
+    let existingHandle: FirefoxExtensionHandle | undefined
     let installed: InstalledExtension
     try {
       installed = await this.session.installExtension(path, (extensionId) => {
         registeredId = extensionId
         this.diagnostics.addExtensionId(extensionId)
+        existingHandle = this.handles.get(extensionId)
+        return existingHandle !== undefined
       })
     } catch (error) {
-      if (registeredId) this.diagnostics.removeExtensionId(registeredId)
+      if (registeredId && !existingHandle) this.diagnostics.removeExtensionId(registeredId)
       throw error
     }
-    if (this.handles.has(installed.id)) {
-      await this.session.uninstallAddon(installed.id).catch(() => undefined)
-      throw new Error(`Firefox extension ${installed.id} is already present in this collection`)
-    }
-    const handle = new FirefoxExtensionHandle(
+    const handle = existingHandle ?? this.handles.get(installed.id)
+    if (handle) return handle.replaceInstalled(installed, path)
+    const extension = new FirefoxExtensionHandle(
       this.session,
       this.browserContext,
       installed,
       path,
       () => {
-        if (this.handles.get(installed.id) !== handle) return
+        if (this.handles.get(installed.id) !== extension) return
         this.handles.delete(installed.id)
         this.diagnostics.removeExtensionId(installed.id)
       }
     )
-    this.handles.set(installed.id, handle)
+    this.handles.set(installed.id, extension)
     this.diagnostics.addExtensionId(installed.id)
-    if (this.isolatedPage) handle.bindIsolatedPage(this.isolatedPage)
-    return handle
+    if (this.isolatedPage) extension.bindIsolatedPage(this.isolatedPage)
+    return extension
   }
 }
 
 class FirefoxExtensionHandle implements FirefoxExtension {
   readonly id: string
-  readonly installPath: string
+  installPath: string
   readonly isolatedContexts: RdpIsolatedNamespace
-  private readonly manifest: Record<string, unknown>
+  private manifest: Record<string, unknown>
   private readonly onUninstalled: () => void
   private backgroundEvaluator?: RdpEvaluation
   private backgroundConsoleActor?: string
@@ -305,6 +327,7 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     const backgroundConsoleActor = installed.backgroundTarget?.form?.consoleActor
     this.backgroundConsoleActor =
       typeof backgroundConsoleActor === 'string' ? backgroundConsoleActor : undefined
+    this.state = installed.enabled ? 'enabled' : 'disabled'
     this.onUninstalled = onUninstalled
     this.isolatedContexts = new RdpIsolatedNamespace(session, this.id)
   }
@@ -348,6 +371,40 @@ class FirefoxExtensionHandle implements FirefoxExtension {
       () => undefined
     )
     return run
+  }
+  replaceFromPath(path: string): Promise<FirefoxExtension> {
+    return this.enqueueLifecycle(async () => {
+      this.assertInstalled()
+      await this.prepareLifecycleChange()
+      const installed = await this.session.installExtension(path, undefined, true)
+      if (installed.id !== this.id) {
+        await this.session.uninstallAddon(installed.id).catch(() => undefined)
+        throw new Error(`Firefox installed ${installed.id} while replacing extension ${this.id}`)
+      }
+      this.updateInstalled(installed, path)
+      return this
+    })
+  }
+
+  replaceInstalled(installed: InstalledExtension, path: string): Promise<FirefoxExtension> {
+    return this.enqueueLifecycle(async () => {
+      this.assertInstalled()
+      await this.prepareLifecycleChange()
+      if (installed.id !== this.id)
+        throw new Error(`Cannot replace extension ${this.id} with ${installed.id}`)
+      this.updateInstalled(installed, path)
+      return this
+    })
+  }
+
+  private updateInstalled(installed: InstalledExtension, path: string): void {
+    this.installPath = path
+    this.manifest = installed.manifest
+    this.backgroundEvaluator = installed.background
+    const consoleActor = installed.backgroundTarget?.form?.consoleActor
+    this.backgroundConsoleActor = typeof consoleActor === 'string' ? consoleActor : undefined
+    this.extensionBaseUrl = undefined
+    this.state = installed.enabled ? 'enabled' : 'disabled'
   }
 
   private trackExtensionPage(page: Page): Page {
@@ -528,21 +585,15 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     return this.enqueueLifecycle(async () => {
       this.assertInstalled()
       const wasEnabled = this.state === 'enabled'
-      const hasBackground = this.backgroundConsoleActor !== undefined
+      const previousConsoleActor = this.backgroundConsoleActor
       await this.prepareLifecycleChange()
-      if (wasEnabled) {
-        await this.session.setAddonEnabled(this.id, false, hasBackground)
-        this.state = 'disabled'
-      }
-      await this.session.setAddonEnabled(this.id, true, hasBackground)
-      this.state = 'enabled'
-      await this.session.refreshExtensionTargets(this.id)
-      if (wasEnabled) {
-        await this.refreshBackground()
-      } else {
-        await this.session.setAddonEnabled(this.id, false, hasBackground)
-        this.state = 'disabled'
-      }
+      const installed = await this.session.reloadExtension(
+        this.id,
+        this.installPath,
+        wasEnabled,
+        previousConsoleActor
+      )
+      this.updateInstalled(installed, this.installPath)
     })
   }
 
