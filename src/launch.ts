@@ -375,15 +375,64 @@ class FirefoxExtensionHandle implements FirefoxExtension {
   replaceFromPath(path: string): Promise<FirefoxExtension> {
     return this.enqueueLifecycle(async () => {
       this.assertInstalled()
+      const previousPath = this.installPath
+      const previousManifest = this.manifest
       await this.prepareLifecycleChange()
-      const installed = await this.session.installExtension(path, undefined, true)
-      if (installed.id !== this.id) {
-        await this.session.uninstallAddon(installed.id).catch(() => undefined)
-        throw new Error(`Firefox installed ${installed.id} while replacing extension ${this.id}`)
+      try {
+        const installed = await this.session.installExtension(path, undefined, true)
+        if (installed.id !== this.id) {
+          await this.session.uninstallAddon(installed.id).catch(() => undefined)
+          throw new Error(`Firefox installed ${installed.id} while replacing extension ${this.id}`)
+        }
+        this.updateInstalled(installed, path)
+        return this
+      } catch (error) {
+        await this.restoreAfterFailedReplacement(previousPath, previousManifest)
+        throw error
       }
-      this.updateInstalled(installed, path)
-      return this
     })
+  }
+
+  private async restoreAfterFailedReplacement(
+    previousPath: string,
+    previousManifest: Record<string, unknown>
+  ): Promise<void> {
+    let restored: InstalledExtension | undefined
+    try {
+      restored = await this.session.restoreInstalledExtension(
+        this.id,
+        previousPath,
+        previousManifest
+      )
+    } catch {
+      // Fall back to the available Firefox addon state if background target recovery fails.
+    }
+    if (restored) {
+      this.updateInstalled(restored, previousPath)
+      return
+    }
+
+    const installedAddons = await this.session.listAddons().catch(() => undefined)
+    if (installedAddons && !installedAddons.some((addon) => addon.id === this.id)) {
+      this.state = 'uninstalled'
+      this.onUninstalled()
+      return
+    }
+    if (!installedAddons) return
+
+    await this.session.refreshExtensionTargets(this.id, true).catch(() => undefined)
+    this.installPath = previousPath
+    this.manifest = previousManifest
+    this.state = (await this.session.isAddonEnabled(this.id).catch(() => false))
+      ? 'enabled'
+      : 'disabled'
+    if (this.state === 'enabled') {
+      try {
+        await this.refreshBackground(false)
+      } catch {
+        this.backgroundEvaluator = undefined
+      }
+    }
   }
 
   replaceInstalled(installed: InstalledExtension, path: string): Promise<FirefoxExtension> {

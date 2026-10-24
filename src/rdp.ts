@@ -467,6 +467,30 @@ export class FirefoxRdpSession {
       watcher
     }
   }
+  async restoreInstalledExtension(
+    addonId: string,
+    sourcePath: string,
+    fallbackManifest: Record<string, unknown>
+  ): Promise<InstalledExtension | undefined> {
+    const installed = (await this.listAddons()).find((candidate) => candidate.id === addonId)
+    if (!installed) return undefined
+    const manifest = await readExtensionManifest(sourcePath).catch(() => fallbackManifest)
+    const enabled = await this.isAddonEnabled(addonId)
+    const watcher = await this.watchAddonActor(addonId, installed.actor)
+    const background =
+      enabled && hasBackground(manifest)
+        ? await this.waitForExtensionBackground(addonId, manifest)
+        : undefined
+    return {
+      id: addonId,
+      addonActor: installed.actor,
+      manifest,
+      enabled,
+      backgroundTarget: background?.target,
+      background: background?.evaluator,
+      watcher
+    }
+  }
 
   async uninstallAddon(addonId: string): Promise<void> {
     await this.rdp.actor(this.addonsActor).call('uninstallAddon', { addonId })

@@ -159,6 +159,28 @@ test('replaces the same Gecko ID from a directory and XPI while preserving its h
     expect(await extension.background!.evaluate('browser.runtime.getManifest().version')).toBe(
       '3.0'
     )
+    const invalidArchive = new JSZip()
+    invalidArchive.file(
+      'manifest.json',
+      JSON.stringify({
+        manifest_version: 99,
+        name: 'Invalid lifecycle replacement',
+        version: '1.0',
+        browser_specific_settings: { gecko: { id: extension.id } }
+      })
+    )
+    const invalidXpi = join(temporaryDirectory, 'invalid-replacement.xpi')
+    await writeFile(invalidXpi, await invalidArchive.generateAsync({ type: 'nodebuffer' }))
+    const staleBeforeFailure = extension.background
+    await expect(extensions.install(invalidXpi)).rejects.toThrow()
+    expect(extensions.get(extension.id)).toBe(extension)
+    expect(extensions.size).toBe(collectionSize)
+    expect(extension.installPath).toBe(xpiReplacement)
+    expect(extension.background).toBeDefined()
+    await expect(staleBeforeFailure!.evaluate('browser.runtime.id')).rejects.toThrow(/disposed/)
+    expect(await extension.background!.evaluate('browser.runtime.getManifest().version')).toBe(
+      '3.0'
+    )
     expect(sibling.background).toBe(siblingBackground)
     expect(await sibling.background.evaluate('browser.runtime.id')).toBe(sibling.id)
   } finally {
