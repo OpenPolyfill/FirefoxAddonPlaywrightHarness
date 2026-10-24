@@ -1,0 +1,508 @@
+diff --git a/omni.ja/modules/WebRequest.sys.mjs b/omni.ja/modules/WebRequest.sys.mjs
+--- a/omni.ja/modules/WebRequest.sys.mjs
++++ b/omni.ja/modules/WebRequest.sys.mjs
+@@ -132 +132 @@
+-  constructor(channel) {
++  constructor(channel, headers = undefined) {
+@@ -135 +135 @@
+-    this.array = this.readHeaders();
++    this.array = headers ?? this.readHeaders();
+@@ -303 +303,22 @@
+-  }
++    this._updateHeaderArray(name, value, merge, lowerCaseName);
++  }
++  _updateHeaderArray(name, value, merge, lowerCaseName) {
++    const firstIndex = this.array.findIndex(
++      header => header.name.toLowerCase() === lowerCaseName
++    );
++    if (value === "") {
++      this.array = this.array.filter(
++        header => header.name.toLowerCase() !== lowerCaseName
++      );
++    } else if (merge || firstIndex === -1) {
++      this.array.push({ name, value });
++    } else {
++      this.array = this.array.filter(
++        (header, index) =>
++          header.name.toLowerCase() !== lowerCaseName || index === firstIndex
++      );
++      this.array[firstIndex] = { name, value };
++    }
++    this.map = null;
++  }
++
+@@ -629,0 +651,2 @@
++  jugglerChannelsById: new Map(),
++  jugglerSnapshotsById: new Map(),
+@@ -641 +664,4 @@
+-      if (this.listeners.onErrorOccurred.size) {
++      const hasWebRequestListeners = Object.values(this.listeners).some(
++        listeners => listeners.size > 0
++      );
++      if (this.listeners.onErrorOccurred.size || hasWebRequestListeners) {
+@@ -647 +673 @@
+-      if (this.listeners.onCompleted.size) {
++      if (this.listeners.onCompleted.size || hasWebRequestListeners) {
+@@ -662,0 +689,3 @@
++    const hasWebRequestListeners = Object.values(this.listeners).some(
++      listeners => listeners.size > 0
++    );
+@@ -668,0 +698 @@
++      hasWebRequestListeners ||
+@@ -746,0 +777,59 @@
++
++  forgetJugglerChannel(channel) {
++    for (const [id, candidate] of this.jugglerChannelsById) {
++      if (candidate === channel) {
++        this.jugglerChannelsById.delete(id);
++        this.jugglerSnapshotsById.delete(id);
++      }
++    }
++  },
++  dispatchJugglerEvent(channel, kind, extraData = null) {
++    let nativeKey;
++    try {
++      nativeKey = `native:${String(
++        channel.QueryInterface(Ci.nsIIdentChannel).channelId
++      )}`;
++    } catch (e) {
++      throw new Error("Juggler WebRequest dispatch requires a shared channel ID");
++    }
++    const wrapper = this.jugglerChannelsById.get(nativeKey);
++    const hasWebRequestListeners = Object.values(this.listeners).some(
++      listeners => listeners.size > 0
++    );
++    if (!wrapper) {
++      if (!hasWebRequestListeners) {
++        return kind === "onHeadersReceived"
++          ? extraData?.syntheticResponse?.responseHeaders
++          : undefined;
++      }
++      throw new Error(`No matching WebRequest channel for ${nativeKey}`);
++    }
++
++    const isSynthetic = !!(extraData?.syntheticRequest || extraData?.syntheticResponse);
++    const snapshot = isSynthetic ? this.jugglerSnapshotsById.get(nativeKey) : null;
++    if (isSynthetic && !snapshot) {
++      throw new Error(`No WebRequest matching snapshot for ${nativeKey}`);
++    }
++    if (isSynthetic && extraData?.syntheticResponse) {
++      snapshot.syntheticResponse = extraData.syntheticResponse;
++    }
++    if (isSynthetic) {
++      wrapper._jugglerSyntheticLifecycle = true;
++    }
++    const eventData = isSynthetic
++      ? { ...extraData, jugglerSynthetic: true, jugglerSnapshot: snapshot }
++      : extraData;
++    const result = this.runChannelListener(wrapper, kind, eventData);
++    if (kind === "onCompleted" || kind === "onErrorOccurred") {
++      return Promise.resolve(result).finally(() => this.forgetJugglerChannel(wrapper));
++    }
++    if (isSynthetic) {
++      return Promise.resolve(result).catch(error => {
++        this.forgetJugglerChannel(wrapper);
++        throw error;
++      });
++    }
++    return result;
++  },
++
++
+@@ -748,0 +838,3 @@
++    if (channel._jugglerSyntheticLifecycle && topic !== "http-on-modify-request") {
++      return;
++    }
+@@ -750,0 +843,2 @@
++        this.rememberJugglerChannel(channel);
++        this.getRequestData(channel, null);
+@@ -765,0 +860,67 @@
++  rememberJugglerChannel(channel) {
++    this.jugglerChannelsById.set(`wrapper:${channel.id}`, channel);
++    let nativeKey;
++    try {
++      const sharedChannelId = String(
++        channel.channel.QueryInterface(Ci.nsIIdentChannel).channelId
++      );
++      nativeKey = `native:${sharedChannelId}`;
++      this.jugglerChannelsById.set(nativeKey, channel);
++    } catch (e) {
++      // Some channels do not expose a shared channelId.
++      return null;
++    }
++    // Route fulfillment may detach the channel before its response events.
++    // Cache normal Firefox matches while it is live to preserve URL,
++    // host-permission, and container checks for synthetic events.
++    if (!this.jugglerSnapshotsById.has(nativeKey) && channel.finalURL) {
++      const browserData = this.getBrowserData(channel);
++      const userContextId = channel.loadInfo?.originAttributes.userContextId;
++      const matchesByKind = new Map();
++      const proxyAuthRequiredCallbacks = new Set();
++      for (const [kind, listeners] of Object.entries(this.listeners)) {
++        const matchedCallbacks = new Set();
++        listeners.forEach((opts, callback) => {
++          if (opts.filter.tabId !== null || opts.filter.windowId !== null) {
++            if (
++              (opts.filter.tabId !== null && browserData.tabId != opts.filter.tabId) ||
++              (opts.filter.windowId !== null && browserData.windowId != opts.filter.windowId)
++            ) {
++              return;
++            }
++          }
++          const extension = opts.policy?.extension;
++          if (
++            extension?.userContextIsolation &&
++            !extension.canAccessContainer(userContextId)
++          ) {
++            return;
++          }
++          if (channel.matches(opts.filter, opts.policy, null)) {
++            matchedCallbacks.add(callback);
++          }
++          if (
++            kind === "onAuthRequired" &&
++            channel.matches(opts.filter, opts.policy, { isProxy: true })
++          ) {
++            proxyAuthRequiredCallbacks.add(callback);
++          }
++        });
++        matchesByKind.set(kind, matchedCallbacks);
++      }
++      let requestHeaders = [];
++      try {
++        requestHeaders = new RequestHeaderChanger(channel).toArray();
++      } catch (e) {}
++      this.jugglerSnapshotsById.set(nativeKey, {
++        matchesByKind,
++        proxyAuthRequiredCallbacks,
++        browserData,
++        userContextId,
++        requestHeaders,
++        requestData: null,
++      });
++    }
++    return nativeKey;
++  },
++
+@@ -766,0 +928 @@
++    const nativeKey = this.rememberJugglerChannel(channel);
+@@ -812 +974,6 @@
+-    return Object.assign(data, extraData);
++    const requestData = Object.assign(data, extraData);
++    const snapshot = this.jugglerSnapshotsById.get(nativeKey);
++    if (snapshot && !snapshot.requestData && !extraData?.jugglerSynthetic) {
++      snapshot.requestData = { ...requestData };
++    }
++    return requestData;
+@@ -816,0 +984,3 @@
++    if (channel._jugglerSyntheticLifecycle) {
++      return;
++    }
+@@ -819,3 +989,6 @@
+-        this.runChannelListener(channel, "onErrorOccurred", {
+-          error: channel.errorString,
+-        });
++        if (this.listeners.onErrorOccurred.size) {
++          this.runChannelListener(channel, "onErrorOccurred", {
++            error: channel.errorString,
++          });
++        }
++        this.forgetJugglerChannel(channel);
+@@ -827 +1000,4 @@
+-        this.runChannelListener(channel, "onCompleted");
++        if (this.listeners.onCompleted.size) {
++          this.runChannelListener(channel, "onCompleted");
++        }
++        this.forgetJugglerChannel(channel);
+@@ -864,0 +1041,7 @@
++    const syntheticResponse = extraData?.syntheticResponse;
++    const isSyntheticJugglerEvent = !!extraData?.jugglerSynthetic;
++    const jugglerSnapshot = extraData?.jugglerSnapshot;
++    const matchedCallbacks =
++      isSyntheticJugglerEvent && kind === "onAuthRequired" && extraData?.isProxy
++        ? jugglerSnapshot?.proxyAuthRequiredCallbacks
++        : jugglerSnapshot?.matchesByKind.get(kind);
+@@ -867 +1050,6 @@
+-      if (kind !== "onErrorOccurred" && channel.errorString) {
++      if (
++        kind !== "onErrorOccurred" &&
++        channel.errorString &&
++        !syntheticResponse &&
++        !extraData?.syntheticRequest
++      ) {
+@@ -870 +1058 @@
+-      if (this.dnrActive) {
++      if (this.dnrActive && !isSyntheticJugglerEvent) {
+@@ -879,2 +1067,22 @@
+-        if (opts.filter.tabId !== null || opts.filter.windowId !== null) {
+-          const { tabId, windowId } = this.getBrowserData(channel);
++        // Synthetic events use only listeners that passed normal matching.
++        if (isSyntheticJugglerEvent) {
++          if (!matchedCallbacks?.has(callback)) {
++            return;
++          }
++        } else {
++          if (opts.filter.tabId !== null || opts.filter.windowId !== null) {
++            const { tabId, windowId } = this.getBrowserData(channel);
++            if (
++              (opts.filter.tabId !== null && tabId != opts.filter.tabId) ||
++              (opts.filter.windowId !== null && windowId != opts.filter.windowId)
++            ) {
++              return;
++            }
++          }
++          // ChannelWrapper::Matches checks both the request filter and the
++          // extension's access to modify the request.
++          if (!channel.matches(opts.filter, opts.policy, extraData)) {
++            return;
++          }
++
++          let extension = opts.policy?.extension;
+@@ -882,2 +1090,4 @@
+-            (opts.filter.tabId !== null && tabId != opts.filter.tabId) ||
+-            (opts.filter.windowId !== null && windowId != opts.filter.windowId)
++            extension?.userContextIsolation &&
++            !extension.canAccessContainer(
++              channel.loadInfo?.originAttributes.userContextId
++            )
+@@ -888,21 +1097,0 @@
+-        // ChannelWrapper::Matches does not only match the filter, it also
+-        // checks whether the extension is allowed to modify the request.
+-        // Regardless of extension permissions, if channel.canModify is false,
+-        // then the request is not matched.
+-        // There is one exception: When opts.isProxy is set (in onAuthRequired)
+-        // AND the extension has the "proxy" permission, then the extension is
+-        // allowed to handle the request regardless of channel.canModify.
+-        if (!channel.matches(opts.filter, opts.policy, extraData)) {
+-          return;
+-        }
+-
+-        let extension = opts.policy?.extension;
+-        // TODO: Move this logic to ChannelWrapper::matches, see bug 1699481
+-        if (
+-          extension?.userContextIsolation &&
+-          !extension.canAccessContainer(
+-            channel.loadInfo?.originAttributes.userContextId
+-          )
+-        ) {
+-          return;
+-        }
+@@ -911 +1100,11 @@
+-          commonData = this.getRequestData(channel, extraData);
++          commonData = isSyntheticJugglerEvent
++            ? {
++                ...(jugglerSnapshot?.requestData ?? {}),
++                ...(extraData?.redirectUrl ? { redirectUrl: extraData.redirectUrl } : {}),
++                ...(extraData?.isProxy !== undefined ? { isProxy: extraData.isProxy } : {}),
++                ...(extraData?.challenger ? { challenger: extraData.challenger } : {}),
++                ...(extraData?.realm ? { realm: extraData.realm } : {}),
++                ...(extraData?.scheme ? { scheme: extraData.scheme } : {}),
++                ...(extraData?.error !== undefined ? { error: extraData.error } : {}),
++              }
++            : this.getRequestData(channel, extraData);
+@@ -913,2 +1112,2 @@
+-            commonData.statusCode = channel.statusCode;
+-            commonData.statusLine = channel.statusLine;
++            commonData.statusCode = syntheticResponse?.statusCode ?? channel.statusCode;
++            commonData.statusLine = syntheticResponse?.statusLine ?? channel.statusLine;
+@@ -920 +1119,6 @@
+-        if (registerFilter && opts.blocking && opts.policy) {
++        if (
++          registerFilter &&
++          opts.blocking &&
++          opts.policy &&
++          !isSyntheticJugglerEvent
++        ) {
+@@ -925 +1129,6 @@
+-          requestHeaders = requestHeaders || new RequestHeaderChanger(channel);
++          requestHeaders =
++            requestHeaders ||
++            new RequestHeaderChanger(
++              channel,
++              isSyntheticJugglerEvent ? jugglerSnapshot?.requestHeaders : undefined
++            );
+@@ -932 +1141 @@
+-              responseHeaders || new ResponseHeaderChanger(channel);
++              responseHeaders || new ResponseHeaderChanger(channel, syntheticResponse?.responseHeaders);
+@@ -939 +1148 @@
+-        if (opts.requestBody) {
++        if (opts.requestBody && !isSyntheticJugglerEvent) {
+@@ -960 +1169,5 @@
+-    if (this.dnrActive && lazy.ExtensionDNR.handleRequest(channel, kind)) {
++    if (
++      !isSyntheticJugglerEvent &&
++      this.dnrActive &&
++      lazy.ExtensionDNR.handleRequest(channel, kind)
++    ) {
+@@ -964 +1177 @@
+-    return this.applyChanges(
++    const applyPromise = this.applyChanges(
+@@ -969 +1182,2 @@
+-      responseHeaders
++      responseHeaders,
++      extraData
+@@ -970,0 +1185,6 @@
++    if (syntheticResponse) {
++      return Promise.resolve(applyPromise).then(
++        () => responseHeaders?.toArray() ?? syntheticResponse.responseHeaders
++      );
++    }
++    return applyPromise;
+@@ -978 +1198,2 @@
+-    responseHeaders
++    responseHeaders,
++    extraData = null
+@@ -981 +1202 @@
+-    let shouldResume = !channel.suspended;
++    let shouldResume = !extraData?.jugglerSynthetic && !channel.suspended;
+@@ -998 +1219,3 @@
+-          channel.suspend(markerText);
++          if (!extraData?.jugglerSynthetic) {
++            channel.suspend(markerText);
++          }
+@@ -1137,2 +1360,2 @@
+-        this.runChannelListener(channel, "onSendHeaders");
+-      } else if (kind !== "onErrorOccurred") {
++        this.runChannelListener(channel, "onSendHeaders", extraData);
++      } else if (kind !== "onErrorOccurred" && !extraData?.jugglerSynthetic) {
+@@ -1188,4 +1411,17 @@
+-    if (this.hasRedirects) {
+-      this.runChannelListener(channel, "onBeforeRedirect", {
+-        redirectUrl: newChannel.originalURI.spec,
+-      });
++    const isInternalRedirect = !channel._jugglerSyntheticLifecycle && channel.statusCode === 0;
++    const extraData = {
++      redirectUrl: newChannel.originalURI.spec,
++    };
++    if (channel._jugglerSyntheticLifecycle) {
++      const nativeKey = `native:${String(
++        oldChannel.QueryInterface(Ci.nsIIdentChannel).channelId
++      )}`;
++      const snapshot = this.jugglerSnapshotsById.get(nativeKey);
++      if (snapshot) {
++        extraData.jugglerSynthetic = true;
++        extraData.jugglerSnapshot = snapshot;
++        extraData.syntheticResponse = snapshot.syntheticResponse;
++      }
++    }
++    if (this.hasRedirects && !isInternalRedirect) {
++      this.runChannelListener(channel, "onBeforeRedirect", extraData);
+@@ -1195,0 +1432 @@
++
+@@ -1258,0 +1496,3 @@
++  dispatchJugglerEvent: (channel, kind, extraData = null) =>
++    HttpObserverManager.dispatchJugglerEvent(channel, kind, extraData),
++
+diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/juggler/content/NetworkObserver.js
+--- a/omni.ja/chrome/juggler/content/NetworkObserver.js
++++ b/omni.ja/chrome/juggler/content/NetworkObserver.js
+@@ -29,0 +30 @@
++
+@@ -84 +85 @@
+-    this._takeIntercepted(requestId).fulfill(status, statusText, headers, base64body);
++    return this._takeIntercepted(requestId).fulfill(status, statusText, headers, base64body);
+@@ -88 +89 @@
+-    this._takeIntercepted(requestId).abort(errorCode);
++    return this._takeIntercepted(requestId).abort(errorCode);
+@@ -202 +203 @@
+-  abort(errorCode) {
++  async abort(errorCode) {
+@@ -203,0 +205,4 @@
++    await this._dispatchWebRequestEvent('onErrorOccurred', {
++      syntheticRequest: true,
++      error: helper.getNetworkErrorStatusText(error)
++    });
+@@ -209 +214 @@
+-  fulfill(status, statusText, headers, base64body) {
++  async fulfill(status, statusText, headers, base64body) {
+@@ -210,0 +216,48 @@
++    const responseDetails = {
++      statusCode: status,
++      statusLine: `HTTP/1.1 ${status} ${statusText}`,
++      responseHeaders: headers
++    };
++    await this._dispatchWebRequestEvent('onBeforeSendHeaders', { syntheticRequest: true });
++    const finalHeaders = await this._dispatchWebRequestEvent('onHeadersReceived', {
++      syntheticResponse: responseDetails
++    });
++    if (Array.isArray(finalHeaders))
++      headers = finalHeaders;
++    this._fulfilledResponseDetails = {
++      ...responseDetails,
++      responseHeaders: headers
++    };
++    if (status === 401 || status === 407) {
++      const isProxy = status === 407;
++      let proxyInfo;
++      if (isProxy) {
++        try {
++          proxyInfo = this.httpChannel.QueryInterface(Ci.nsIProxiedChannel).proxyInfo;
++        } catch (e) {}
++      }
++      if (!isProxy || (proxyInfo && proxyInfo.type !== 'direct')) {
++        const authHeaderName = isProxy ? 'proxy-authenticate' : 'www-authenticate';
++        const authHeader = headers.find(
++          header => header.name.toLowerCase() === authHeaderName
++        );
++        if (authHeader) {
++          const challenge = /^([^\s,]+)(?:\s+.*?\brealm=(?:"([^"]*)"|([^,\s]+)))?/i.exec(
++            authHeader.value
++          );
++          const uri = Services.io.newURI(this.httpChannel.URI.spec);
++          await this._dispatchWebRequestEvent('onAuthRequired', {
++            syntheticResponse: this._fulfilledResponseDetails,
++            isProxy,
++            challenger: isProxy
++              ? { host: proxyInfo.host, port: proxyInfo.port }
++              : {
++                  host: uri.asciiHost,
++                  port: uri.port > 0 ? uri.port : uri.scheme === 'https' ? 443 : 80
++                },
++            scheme: challenge?.[1]?.toLowerCase(),
++            realm: challenge?.[2] ?? challenge?.[3] ?? ''
++          });
++        }
++      }
++    }
+@@ -226,0 +280,14 @@
++
++  async _dispatchWebRequestEvent(kind, extraData = null) {
++    const { ExtensionParent } = ChromeUtils.importESModule(
++      'resource://gre/modules/ExtensionParent.sys.mjs'
++    );
++    const webRequest = ExtensionParent.apiManager.global?.WebRequest;
++    if (!webRequest?.dispatchJugglerEvent) {
++      return kind === 'onHeadersReceived'
++        ? extraData?.syntheticResponse?.responseHeaders
++        : undefined;
++    }
++    return webRequest.dispatchJugglerEvent(this.httpChannel, kind, extraData);
++  }
++
+@@ -417,0 +485,4 @@
++    if (this._fulfilledResponseDetails)
++      void this._dispatchWebRequestEvent('onResponseStarted', {
++        syntheticResponse: this._fulfilledResponseDetails
++      }).catch(error => Cu.reportError(error));
+@@ -445,0 +517,5 @@
++      if (this._fulfilledResponseDetails) {
++        void this._dispatchWebRequestEvent('onCompleted', {
++          syntheticResponse: this._fulfilledResponseDetails
++        }).catch(error => Cu.reportError(error));
++      }
+@@ -447,0 +524,6 @@
++      if (this._fulfilledResponseDetails) {
++        void this._dispatchWebRequestEvent('onErrorOccurred', {
++          syntheticResponse: this._fulfilledResponseDetails,
++          error: helper.getNetworkErrorStatusText(aStatusCode)
++        }).catch(error => Cu.reportError(error));
++      }
+diff --git a/omni.ja/chrome/juggler/content/protocol/PageHandler.js b/omni.ja/chrome/juggler/content/protocol/PageHandler.js
+--- a/omni.ja/chrome/juggler/content/protocol/PageHandler.js
++++ b/omni.ja/chrome/juggler/content/protocol/PageHandler.js
+@@ -299 +299 @@
+-    this._pageNetwork.abortInterceptedRequest(requestId, errorCode);
++    return this._pageNetwork.abortInterceptedRequest(requestId, errorCode);
+@@ -303 +303 @@
+-    this._pageNetwork.fulfillInterceptedRequest(requestId, status, statusText, headers, base64body);
++    return this._pageNetwork.fulfillInterceptedRequest(requestId, status, statusText, headers, base64body);

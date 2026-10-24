@@ -4,11 +4,17 @@ import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
 import JSZip from 'jszip'
 import { firefox } from '@playwright/test'
-import { applyUnifiedPatchSet, atomicWrite, getPatchPaths } from '../scripts/unified-patch.mjs'
+import {
+  applyUnifiedPatchSet,
+  atomicWrite,
+  getPatchPaths,
+  type UnifiedPatchResult
+} from '../scripts/unified-patch.mjs'
 
 const packageDir = dirname(fileURLToPath(import.meta.url))
 const firefoxPatchPath = join(packageDir, '../patches/firefox.patch')
 const firefoxLocalModePatchPath = join(packageDir, '../patches/firefox-local-mode.patch')
+const firefoxWebRequestPatchPath = join(packageDir, '../patches/firefox-webrequest.patch')
 const playwrightPatchPath = join(packageDir, '../patches/playwright-core.patch')
 let patchPromise: Promise<void> | undefined
 let patchAssertion: Promise<void> | undefined
@@ -32,6 +38,15 @@ interface FirefoxLocalModePatchTarget {
   sources: Record<string, string>
 }
 
+interface FirefoxPatchTargets {
+  patchText: string
+  webRequestPatchText: string
+  patchPaths: string[]
+  omniPath: string
+  cfgPath: string
+  zip: JSZip
+  sources: Record<string, string>
+}
 async function loadFirefoxLocalModePatchTarget(): Promise<FirefoxLocalModePatchTarget | undefined> {
   const patchText = await readFile(firefoxLocalModePatchPath, 'utf8')
   const patchPaths = getPatchPaths(patchText, 'Firefox Local Mode')
@@ -57,19 +72,18 @@ async function loadFirefoxLocalModePatchTarget(): Promise<FirefoxLocalModePatchT
   return { patchText, patchPaths, archivePath, memberPaths, zip, sources }
 }
 
-async function loadFirefoxPatchTargets(): Promise<{
-  patchText: string
-  patchPaths: string[]
-  omniPath: string
-  cfgPath: string
-  zip: JSZip
-  sources: Record<string, string>
-}> {
+async function loadFirefoxPatchTargets(): Promise<FirefoxPatchTargets> {
   const firefoxDir = firefoxDirectory()
   const omniPath = join(firefoxDir, 'omni.ja')
   const cfgPath = join(firefoxDir, 'playwright.cfg')
   const patchText = await readFile(firefoxPatchPath, 'utf8')
-  const patchPaths = getPatchPaths(patchText, 'Playwright Firefox')
+  const webRequestPatchText = await readFile(firefoxWebRequestPatchPath, 'utf8')
+  const patchPaths = [
+    ...new Set([
+      ...getPatchPaths(patchText, 'Playwright Firefox'),
+      ...getPatchPaths(webRequestPatchText, 'Playwright Firefox WebRequest')
+    ])
+  ]
   if (
     !patchPaths.includes('playwright.cfg') ||
     !patchPaths.some((path) => path.startsWith('omni.ja/'))
@@ -101,12 +115,34 @@ async function loadFirefoxPatchTargets(): Promise<{
     sources[path] = await entry.async('string')
   }
 
-  return { patchText, patchPaths, omniPath, cfgPath, zip, sources }
+  return { patchText, webRequestPatchText, patchPaths, omniPath, cfgPath, zip, sources }
+}
+
+function applyFirefoxPatchTargets(target: FirefoxPatchTargets): UnifiedPatchResult {
+  const baseResult = applyUnifiedPatchSet(target.sources, target.patchText, 'Playwright Firefox')
+  const webRequestSources = { ...target.sources, ...baseResult.files }
+  const webRequestResult = applyUnifiedPatchSet(
+    webRequestSources,
+    target.webRequestPatchText,
+    'Playwright Firefox WebRequest'
+  )
+  if (baseResult.state === 'unpatched' && webRequestResult.state === 'patched') {
+    throw new Error(
+      'Partially applied Playwright Firefox patch set: WebRequest patch is installed without the base patch'
+    )
+  }
+  return {
+    state:
+      baseResult.state === 'patched' && webRequestResult.state === 'patched'
+        ? 'patched'
+        : 'unpatched',
+    files: { ...baseResult.files, ...webRequestResult.files }
+  }
 }
 
 async function firefoxPatchState(): Promise<'unpatched' | 'patched'> {
   const target = await loadFirefoxPatchTargets()
-  return applyUnifiedPatchSet(target.sources, target.patchText, 'Playwright Firefox').state
+  return applyFirefoxPatchTargets(target).state
 }
 
 export async function ensureFirefoxPatched(): Promise<void> {
@@ -169,7 +205,7 @@ async function verifyPatchesApplied(): Promise<void> {
 
 async function patchFirefoxInstallation(): Promise<void> {
   const target = await loadFirefoxPatchTargets()
-  const result = applyUnifiedPatchSet(target.sources, target.patchText, 'Playwright Firefox')
+  const result = applyFirefoxPatchTargets(target)
   const localModeTarget = await loadFirefoxLocalModePatchTarget()
   const localModeResult = localModeTarget
     ? applyUnifiedPatchSet(localModeTarget.sources, localModeTarget.patchText, 'Firefox Local Mode')
