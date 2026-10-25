@@ -197,7 +197,7 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     const requestHeaders = route.request().headers()
     authRouteHeaders.push(requestHeaders)
     const authorization = requestHeaders.authorization
-    if (authorization === 'Basic dGVzdC11c2VyOnRlc3QtcGFzcw==') {
+    if (authorization === 'Basic dGVzdC11c2VyOnRlc3QtcGFzc3dvcmQ=') {
       return route.fulfill({ status: 200, body: 'authenticated' })
     }
     return route.fulfill({
@@ -296,6 +296,10 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     }
   })
 
+  expect(authRouteHeaders).toHaveLength(2)
+  expect(authRouteHeaders[1]).toMatchObject({
+    authorization: 'Basic dGVzdC11c2VyOnRlc3QtcGFzc3dvcmQ='
+  })
   const jsonBody = JSON.stringify({ fulfilled: true, count: 2 })
 
   const readObservations = () =>
@@ -423,7 +427,7 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
         requestHeaders: expect.arrayContaining([
           {
             name: 'authorization',
-            value: 'Basic dGVzdC11c2VyOnRlc3QtcGFzcw=='
+            value: 'Basic dGVzdC11c2VyOnRlc3QtcGFzc3dvcmQ='
           }
         ])
       })
@@ -516,11 +520,6 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
   expect(response.authStatus).toBe(200)
   expect(response.authError).toBe('')
   expect(response.authBody).toBe('authenticated')
-  expect(
-    authRouteHeaders.some(
-      (headers) => headers.authorization === 'Basic dGVzdC11c2VyOnRlc3QtcGFzcw=='
-    )
-  ).toBe(true)
   const redirectRequest = observations.events.find(
     (event) => event.url === redirectUrl && event.event === 'onBeforeRequest'
   )
