@@ -567,6 +567,8 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
       )
     ).toHaveLength(1)
   }
+  expect(redirectChain).not.toContain('onResponseStarted')
+  expect(redirectChain).not.toContain('onCompleted')
 
   const blockingRedirectRequest = observations.events.find(
     (event) => event.url === blockingRedirectUrl && event.event === 'onBeforeRequest'
@@ -576,6 +578,13 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
   )
   expect(blockingRedirectEvent).toMatchObject({ redirectUrl: redirectTargetUrl })
   expect(blockingRedirectEvent?.requestId).toBe(blockingRedirectRequest?.requestId)
+  expect(
+    observations.events.filter(
+      (event) =>
+        event.url === blockingRedirectUrl &&
+        (event.event === 'onResponseStarted' || event.event === 'onCompleted')
+    )
+  ).toHaveLength(0)
 
   const abortRequest = observations.events.find(
     (event) => event.url === abortUrl && event.event === 'onBeforeRequest'
