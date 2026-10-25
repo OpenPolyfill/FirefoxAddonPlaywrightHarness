@@ -13,6 +13,7 @@ Launch an isolated Firefox profile, install multiple extensions from directories
 - [Fixtures and evaluation](/docs/guide/fixtures) — use the `extensions` collection, background and isolated evaluators, and raw `rdp` client.
 - [Actions and popups](/docs/guide/actions) — open browser actions and page actions in headless Firefox.
 - [RDP access](/docs/guide/rdp) — use the `FirefoxRDP` client for low-level protocol operations.
+- [Local mappings and WebRequest](/docs/guide/local-mappings-webrequest) — serve static fixtures and test fulfilled-response events without an HTTP server.
 - [API reference](/docs/api) — browse the public TypeScript API and generated declarations.
 
 ## About compatibility

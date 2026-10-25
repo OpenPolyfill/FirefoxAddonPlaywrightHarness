@@ -250,6 +250,8 @@ const test = createFirefoxFixtures(base, {
 })
 ```
 
+For `route.fulfill()` response status, headers, and body visibility through add-on WebRequest listeners, see the [Local mappings and WebRequest guide](https://github.com/OpenPolyfill/FirefoxAddonPlaywrightHarness/blob/main/docs/content/guide/local-mappings-webrequest.md).
+
 Each page gets its own Firefox RDP network watcher before it is returned to the test. The watcher is removed and its mappings cleared when its page closes; the harness also cleans up all remaining watchers before closing the Firefox context. Firefox Local Mode is isolated per context.
 
 ## Firefox compatibility and security

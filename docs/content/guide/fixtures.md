@@ -98,6 +98,8 @@ Use `localMappings` to serve static directories on HTTPS hostnames without start
 
 Firefox 153+ serves each mapped origin through its built-in DevTools Local Mode. The harness enables `network-event` watching and registers mappings before returning the fixture page or a page created with `context.newPage()`. Each page owns its watcher; closing a page clears its mappings and stops resource watching, and closing the context cleans up any remaining watchers.
 
+For dynamic responses and WebRequest lifecycle behavior with `route.fulfill()`, see [Local mappings and WebRequest](/docs/guide/local-mappings-webrequest).
+
 ### Firefox Native Messaging
 
 Register native hosts in the fixture configuration. Each entry's key becomes the host name in the native manifest:
