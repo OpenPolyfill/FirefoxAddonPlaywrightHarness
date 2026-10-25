@@ -6,6 +6,11 @@ const pathUrl = `${mappedOrigin}path`
 const payloadUrl = `${mappedOrigin}payload.bin`
 const responseUrl = `${mappedOrigin}response`
 const fulfilledUrls = [statusUrl, jsonUrl, contentTypeUrl, pathUrl, responseUrl]
+const requestHeadersUrl = `${mappedOrigin}request-headers`
+const blockingCancelUrl = `${mappedOrigin}blocking-cancel`
+const blockingRedirectUrl = `${mappedOrigin}blocking-redirect`
+const blockingRedirectTargetUrl = `${mappedOrigin}redirect-target`
+const authUrl = `${mappedOrigin}auth`
 const lifecycleEvents = [
   'onBeforeRequest',
   'onBeforeSendHeaders',
@@ -33,6 +38,7 @@ globalThis.localMappingsWebRequestObservations = {
   registered: [],
   registrationErrors: [],
   blocking: [],
+  blockingDecisions: [],
   responseHeaders: [],
   headerChanges: [],
   bodyStreams: [],
@@ -102,6 +108,14 @@ for (const eventName of lifecycleEvents) {
 try {
   browser.webRequest.onHeadersReceived.addListener(
     (details) => {
+      if (details.url === blockingRedirectUrl) {
+        globalThis.localMappingsWebRequestObservations.blockingDecisions.push({
+          url: details.url,
+          action: 'redirect',
+          redirectUrl: blockingRedirectTargetUrl
+        })
+        return { redirectUrl: blockingRedirectTargetUrl }
+      }
       if (details.url !== statusUrl) return {}
       let before
       const responseHeaders = (details.responseHeaders ?? []).map((header) => {
@@ -117,13 +131,66 @@ try {
       })
       return { responseHeaders }
     },
-    { urls: [statusUrl] },
+    { urls: [statusUrl, blockingRedirectUrl] },
     ['blocking', 'responseHeaders']
   )
   globalThis.localMappingsWebRequestObservations.registered.push('onHeadersReceived.blocking')
 } catch (error) {
   globalThis.localMappingsWebRequestObservations.registrationErrors.push({
     eventName: 'onHeadersReceived.blocking',
+    message: String(error)
+  })
+}
+
+try {
+  browser.webRequest.onBeforeSendHeaders.addListener(
+    (details) => {
+      if (details.url === blockingCancelUrl) {
+        globalThis.localMappingsWebRequestObservations.blockingDecisions.push({
+          url: details.url,
+          action: 'cancel'
+        })
+        return { cancel: true }
+      }
+      if (details.url !== requestHeadersUrl) return {}
+      const requestHeaders = (details.requestHeaders ?? []).map((header) =>
+        header.name.toLowerCase() === 'x-harness-request'
+          ? { ...header, value: 'modified-by-webRequest' }
+          : header
+      )
+      globalThis.localMappingsWebRequestObservations.blockingDecisions.push({
+        url: details.url,
+        action: 'requestHeaders',
+        requestHeaders
+      })
+      return { requestHeaders }
+    },
+    { urls: [`${mappedOrigin}*`] },
+    ['blocking', 'requestHeaders']
+  )
+  globalThis.localMappingsWebRequestObservations.registered.push('onBeforeSendHeaders.blocking')
+} catch (error) {
+  globalThis.localMappingsWebRequestObservations.registrationErrors.push({
+    eventName: 'onBeforeSendHeaders.blocking',
+    message: String(error)
+  })
+}
+
+try {
+  browser.webRequest.onAuthRequired.addListener(
+    (details) => {
+      if (details.url !== authUrl) return {}
+      return {
+        authCredentials: { username: 'test-user', password: 'test-password' }
+      }
+    },
+    { urls: [authUrl] },
+    ['blocking', 'responseHeaders']
+  )
+  globalThis.localMappingsWebRequestObservations.registered.push('onAuthRequired.blocking')
+} catch (error) {
+  globalThis.localMappingsWebRequestObservations.registrationErrors.push({
+    eventName: 'onAuthRequired.blocking',
     message: String(error)
   })
 }

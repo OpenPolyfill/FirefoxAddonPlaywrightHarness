@@ -7,6 +7,53 @@ diff --git a/omni.ja/modules/WebRequest.sys.mjs b/omni.ja/modules/WebRequest.sys
 @@ -135 +135 @@
 -    this.array = this.readHeaders();
 +    this.array = headers ?? this.readHeaders();
+@@ -235,10 +235,36 @@
+-  setHeader(name, value, merge, opts, lowerCaseName) {
+-    try {
+-      if (value && lowerCaseName === "host") {
+-        checkRestrictedHeaderValue(value, opts);
+-      }
+-      this.channel.setRequestHeader(name, value, merge);
+-    } catch (e) {
+-      Cu.reportError(new Error(`Error setting request header ${name}: ${e}`));
+-    }
+-  }
++  setHeader(name, value, merge, opts, lowerCaseName) {
++    if (value && lowerCaseName === "host") {
++      try {
++        checkRestrictedHeaderValue(value, opts);
++      } catch (e) {
++        Cu.reportError(new Error(`Error setting request header ${name}: ${e}`));
++        return;
++      }
++    }
++    try {
++      this.channel.setRequestHeader(name, value, merge);
++    } catch (e) {
++      Cu.reportError(new Error(`Error setting request header ${name}: ${e}`));
++    }
++    this._updateHeaderArray(name, value, merge, lowerCaseName);
++  }
++
++  _updateHeaderArray(name, value, merge, lowerCaseName) {
++    const firstIndex = this.array.findIndex(
++      header => header.name.toLowerCase() === lowerCaseName
++    );
++    if (value === "") {
++      this.array = this.array.filter(
++        header => header.name.toLowerCase() !== lowerCaseName
++      );
++    } else if (merge || firstIndex === -1) {
++      this.array.push({ name, value });
++    } else {
++      this.array = this.array.filter(
++        (header, index) =>
++          header.name.toLowerCase() !== lowerCaseName || index === firstIndex
++      );
++      this.array[firstIndex] = { name, value };
++    }
++    this.map = null;
++  }
 @@ -303 +303,22 @@
 -  }
 +    this._updateHeaderArray(name, value, merge, lowerCaseName);
@@ -341,31 +388,91 @@ diff --git a/omni.ja/modules/WebRequest.sys.mjs b/omni.ja/modules/WebRequest.sys
 -      responseHeaders
 +      responseHeaders,
 +      extraData
-@@ -970,0 +1185,6 @@
+@@ -970,0 +1185,10 @@
 +    if (syntheticResponse) {
-+      return Promise.resolve(applyPromise).then(
-+        () => responseHeaders?.toArray() ?? syntheticResponse.responseHeaders
-+      );
++      return Promise.resolve(applyPromise).then(result => {
++        const headers = responseHeaders?.toArray() ?? syntheticResponse.responseHeaders;
++        if (result && (result.cancel || result.redirectUrl || result.authCredentials)) {
++          return { ...result, responseHeaders: headers };
++        }
++        return headers;
++      });
 +    }
 +    return applyPromise;
 @@ -978 +1198,2 @@
 -    responseHeaders
 +    responseHeaders,
 +    extraData = null
-@@ -981 +1202 @@
+@@ -981 +1206,2 @@
 -    let shouldResume = !channel.suspended;
 +    let shouldResume = !extraData?.jugglerSynthetic && !channel.suspended;
++    const syntheticResult = extraData?.jugglerSynthetic ? {} : null;
 @@ -998 +1219,3 @@
 -          channel.suspend(markerText);
 +          if (!extraData?.jugglerSynthetic) {
 +            channel.suspend(markerText);
 +          }
-@@ -1137,2 +1360,2 @@
+@@ -1019,3 +1247,7 @@
+-          if (result.authCredentials && channel.authPromptCallback) {
++          if (result.authCredentials && extraData?.jugglerSynthetic) {
++            if (!syntheticResult.authCredentials) {
++              syntheticResult.authCredentials = result.authCredentials;
++            }
++          } else if (result.authCredentials && channel.authPromptCallback) {
+             channel.authPromptCallback(result.authCredentials);
+           }
+@@ -1031,5 +1261,7 @@
+-          channel.resume();
+-          channel.cancel(
+-            Cr.NS_ERROR_ABORT,
+-            Ci.nsILoadInfo.BLOCKING_REASON_EXTENSION_WEBREQUEST
+-          );
++          if (!extraData?.jugglerSynthetic) {
++            channel.resume();
++            channel.cancel(
++              Cr.NS_ERROR_ABORT,
++              Ci.nsILoadInfo.BLOCKING_REASON_EXTENSION_WEBREQUEST
++            );
++          }
+@@ -1041 +1273 @@
+-          if (opts.policy) {
++          if (opts.policy && !extraData?.jugglerSynthetic) {
+@@ -1047 +1279 @@
+-          return;
++          return syntheticResult ? { ...syntheticResult, cancel: true } : undefined;
+@@ -1053 +1285,3 @@
+-            channel.resume();
++            if (!extraData?.jugglerSynthetic) {
++              channel.resume();
++            }
+@@ -1056 +1290,5 @@
+-            channel.redirectTo(redirectUri);
++            if (!extraData?.jugglerSynthetic) {
++              channel.redirectTo(redirectUri);
++            } else {
++              return syntheticResult ? { ...syntheticResult, redirectUrl } : undefined;
++            }
+@@ -1062 +1300 @@
+-            if (opts.policy) {
++            if (opts.policy && !extraData?.jugglerSynthetic) {
+@@ -1107 +1345 @@
+-            return;
++            return syntheticResult ? { ...syntheticResult, redirectUrl } : undefined;
+@@ -1137,2 +1375,7 @@
 -        this.runChannelListener(channel, "onSendHeaders");
 -      } else if (kind !== "onErrorOccurred") {
++        if (extraData?.jugglerSynthetic && extraData.jugglerSnapshot) {
++          try {
++            extraData.jugglerSnapshot.requestHeaders = requestHeaders.toArray();
++          } catch (e) {}
++        }
 +        this.runChannelListener(channel, "onSendHeaders", extraData);
 +      } else if (kind !== "onErrorOccurred" && !extraData?.jugglerSynthetic) {
-@@ -1188,4 +1411,17 @@
+@@ -1148,0 +1392,3 @@
++    if (syntheticResult && Object.keys(syntheticResult).length) {
++      return syntheticResult;
++    }
+@@ -1188,4 +1434,17 @@
 -    if (this.hasRedirects) {
 -      this.runChannelListener(channel, "onBeforeRedirect", {
 -        redirectUrl: newChannel.originalURI.spec,
@@ -387,9 +494,9 @@ diff --git a/omni.ja/modules/WebRequest.sys.mjs b/omni.ja/modules/WebRequest.sys
 +    }
 +    if (this.hasRedirects && !isInternalRedirect) {
 +      this.runChannelListener(channel, "onBeforeRedirect", extraData);
-@@ -1195,0 +1432 @@
+@@ -1195,0 +1453 @@
 +
-@@ -1258,0 +1496,3 @@
+@@ -1258,0 +1517,3 @@
 +  dispatchJugglerEvent: (channel, kind, extraData = null) =>
 +    HttpObserverManager.dispatchJugglerEvent(channel, kind, extraData),
 +
@@ -404,6 +511,11 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 @@ -88 +89 @@
 -    this._takeIntercepted(requestId).abort(errorCode);
 +    return this._takeIntercepted(requestId).abort(errorCode);
+@@ -194,2 +195,2 @@
+-  resume(url, method, headers, postData) {
+-    this._expectingResumedRequest = { method, headers, postData };
++  resume(url, method, headers, postData, authHeader = undefined) {
++    this._expectingResumedRequest = { method, headers, postData, authHeader };
 @@ -202 +203 @@
 -  abort(errorCode) {
 +  async abort(errorCode) {
@@ -415,16 +527,23 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 @@ -209 +214 @@
 -  fulfill(status, statusText, headers, base64body) {
 +  async fulfill(status, statusText, headers, base64body) {
-@@ -210,0 +216,48 @@
+@@ -210,0 +216,80 @@
 +    const responseDetails = {
 +      statusCode: status,
 +      statusLine: `HTTP/1.1 ${status} ${statusText}`,
 +      responseHeaders: headers
 +    };
-+    await this._dispatchWebRequestEvent('onBeforeSendHeaders', { syntheticRequest: true });
-+    const finalHeaders = await this._dispatchWebRequestEvent('onHeadersReceived', {
++    const requestResult = await this._dispatchWebRequestEvent('onBeforeSendHeaders', {
++      syntheticRequest: true
++    });
++    if (await this._handleWebRequestDecision(requestResult)) return;
++    const headerResult = await this._dispatchWebRequestEvent('onHeadersReceived', {
 +      syntheticResponse: responseDetails
 +    });
++    if (await this._handleWebRequestDecision(headerResult)) return;
++    const finalHeaders = Array.isArray(headerResult)
++      ? headerResult
++      : headerResult?.responseHeaders;
 +    if (Array.isArray(finalHeaders))
 +      headers = finalHeaders;
 +    this._fulfilledResponseDetails = {
@@ -449,7 +568,7 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +            authHeader.value
 +          );
 +          const uri = Services.io.newURI(this.httpChannel.URI.spec);
-+          await this._dispatchWebRequestEvent('onAuthRequired', {
++          const authResult = await this._dispatchWebRequestEvent('onAuthRequired', {
 +            syntheticResponse: this._fulfilledResponseDetails,
 +            isProxy,
 +            challenger: isProxy
@@ -461,10 +580,35 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +            scheme: challenge?.[1]?.toLowerCase(),
 +            realm: challenge?.[2] ?? challenge?.[3] ?? ''
 +          });
++          if (await this._handleWebRequestDecision(authResult)) return;
++          const credentials = authResult?.authCredentials;
++          if (
++            challenge?.[1]?.toLowerCase() === 'basic' &&
++            typeof credentials?.username === 'string' &&
++            typeof credentials.password === 'string'
++          ) {
++            const authorizationHeaderName = isProxy ? 'Proxy-Authorization' : 'Authorization';
++            const encodedCredentials = btoa(
++              `${credentials.username}:${credentials.password}`
++            );
++            const authorizationHeader = {
++              name: authorizationHeaderName,
++              value: `Basic ${encodedCredentials}`
++            };
++            this._fulfilledResponseDetails = undefined;
++            this.resume(
++              this.httpChannel.URI.spec,
++              this.httpChannel.requestMethod,
++              requestHeaders(this.httpChannel),
++              readRequestPostData(this.httpChannel),
++              authorizationHeader
++            );
++            return;
++          }
 +        }
 +      }
 +    }
-@@ -226,0 +280,14 @@
+@@ -226,0 +312,33 @@
 +
 +  async _dispatchWebRequestEvent(kind, extraData = null) {
 +    const { ExtensionParent } = ChromeUtils.importESModule(
@@ -479,18 +623,53 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +    return webRequest.dispatchJugglerEvent(this.httpChannel, kind, extraData);
 +  }
 +
-@@ -417,0 +485,4 @@
++  async _handleWebRequestDecision(result) {
++    if (result?.cancel) {
++      const error = Cr.NS_ERROR_ABORT;
++      if (!this._fulfilledResponseDetails) {
++        await this._dispatchWebRequestEvent('onErrorOccurred', {
++          syntheticRequest: true,
++          error: helper.getNetworkErrorStatusText(error)
++        });
++      }
++      this._interceptedChannel.cancelInterception(error);
++      this._interceptedChannel = undefined;
++      return true;
++    }
++    if (result?.redirectUrl) {
++      this.resume(result.redirectUrl, undefined, undefined, undefined);
++      return true;
++    }
++    return false;
++  }
+@@ -246,12 +364,14 @@
+-    const { method, headers, postData } = this._expectingResumedRequest;
++    const { method, headers, postData, authHeader } = this._expectingResumedRequest;
+     this._overriddenHeadersForRedirect = headers;
+     this._expectingResumedRequest = undefined;
+
+     if (headers)
+       overrideRequestHeaders(this.httpChannel, headers);
+     else if (this._pageNetwork)
+       appendExtraHTTPHeaders(this.httpChannel, this._pageNetwork.combinedExtraHTTPHeaders());
++    if (authHeader)
++      this.httpChannel.setRequestHeader(authHeader.name, authHeader.value, false);
+     if (method)
+       this.httpChannel.requestMethod = method;
+     if (postData !== undefined)
+       setPostData(this.httpChannel, postData, headers);
+@@ -417,0 +538,4 @@
 +    if (this._fulfilledResponseDetails)
 +      void this._dispatchWebRequestEvent('onResponseStarted', {
 +        syntheticResponse: this._fulfilledResponseDetails
 +      }).catch(error => Cu.reportError(error));
-@@ -445,0 +517,5 @@
+@@ -445,0 +570,5 @@
 +      if (this._fulfilledResponseDetails) {
 +        void this._dispatchWebRequestEvent('onCompleted', {
 +          syntheticResponse: this._fulfilledResponseDetails
 +        }).catch(error => Cu.reportError(error));
 +      }
-@@ -447,0 +524,6 @@
+@@ -447,0 +540,6 @@
 +      if (this._fulfilledResponseDetails) {
 +        void this._dispatchWebRequestEvent('onErrorOccurred', {
 +          syntheticResponse: this._fulfilledResponseDetails,

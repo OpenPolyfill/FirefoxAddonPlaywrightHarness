@@ -14,6 +14,9 @@ const redirectTargetUrl = `${mappedOrigin}/redirect-target`
 const abortUrl = `${mappedOrigin}/abort`
 const authUrl = `${mappedOrigin}/auth`
 const origin407Url = `${mappedOrigin}/origin-407`
+const blockingCancelUrl = `${mappedOrigin}/blocking-cancel`
+const blockingRedirectUrl = `${mappedOrigin}/blocking-redirect`
+const requestHeadersUrl = `${mappedOrigin}/request-headers`
 const extensionPath = new URL('../fixtures/web-request-local-mode-extension', import.meta.url)
   .pathname
 const noListenerExtensionPath = new URL(
@@ -83,6 +86,7 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
   const extension = extensions.values().next().value
   if (!extension?.background) throw new Error('The webRequest fixture must have a background page')
   const background = extension.background
+  const authRouteHeaders: Record<string, string>[] = []
   // A real APIResponse is needed for this overload; stub only its request transport
   // so the test can exercise it without starting an HTTP server.
   const requestConnection = (
@@ -171,13 +175,37 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     })
   )
   await page.route(abortUrl, (route) => route.abort('failed'))
-  await page.route(authUrl, (route) =>
+  await page.route(requestHeadersUrl, (route) =>
     route.fulfill({
+      status: 200,
+      body: 'request headers'
+    })
+  )
+  await page.route(blockingCancelUrl, (route) =>
+    route.fulfill({
+      status: 200,
+      body: 'should be canceled'
+    })
+  )
+  await page.route(blockingRedirectUrl, (route) =>
+    route.fulfill({
+      status: 200,
+      body: 'should be redirected'
+    })
+  )
+  await page.route(authUrl, (route) => {
+    const requestHeaders = route.request().headers()
+    authRouteHeaders.push(requestHeaders)
+    const authorization = requestHeaders.authorization
+    if (authorization === 'Basic dGVzdC11c2VyOnRlc3QtcGFzcw==') {
+      return route.fulfill({ status: 200, body: 'authenticated' })
+    }
+    return route.fulfill({
       status: 401,
       headers: { 'www-authenticate': 'Basic realm="harness"' },
       body: 'authentication challenge'
     })
-  )
+  })
   await page.route(origin407Url, (route) =>
     route.fulfill({
       status: 407,
@@ -206,19 +234,32 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
       url: redirected.url,
       body: await redirected.text()
     }
+    const blockingRedirect = await fetch('/blocking-redirect', { cache: 'no-store' })
+    const blockingRedirectResponse = {
+      status: blockingRedirect.status,
+      url: blockingRedirect.url,
+      body: await blockingRedirect.text()
+    }
     let abortError = ''
     try {
       await fetch('/abort', { cache: 'no-store' })
     } catch (error) {
       abortError = String(error)
     }
+    let blockingCancelError = ''
+    try {
+      await fetch('/blocking-cancel', { cache: 'no-store' })
+    } catch (error) {
+      blockingCancelError = String(error)
+    }
 
     let authStatus: number | null = null
+    let authBody = ''
     let authError = ''
     try {
       const auth = await fetch('/auth', { cache: 'no-store' })
       authStatus = auth.status
-      await auth.arrayBuffer()
+      authBody = await auth.text()
     } catch (error) {
       authError = String(error)
     }
@@ -231,13 +272,23 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     } catch (error) {
       origin407Error = String(error)
     }
+    const requestHeadersResponse = await fetch('/request-headers', {
+      cache: 'no-store',
+      headers: { 'x-harness-request': 'original' }
+    })
+    const requestHeadersStatus = requestHeadersResponse.status
+    await requestHeadersResponse.arrayBuffer()
     const mapped = await fetch('/payload.bin', { cache: 'no-store' })
     return {
       fulfilled,
       redirected: redirectedResponse,
+      blockingRedirected: blockingRedirectResponse,
       abortError,
+      blockingCancelError,
       authStatus,
       authError,
+      authBody,
+      requestHeadersStatus,
       origin407Status,
       origin407Error,
       mappedStatus: mapped.status,
@@ -309,9 +360,18 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
 
   await expect.poll(readObservations).toMatchObject({
     ordinary: expect.arrayContaining(
-      [`${mappedOrigin}/`, statusUrl, jsonUrl, contentTypeUrl, pathUrl, payloadUrl].map((url) =>
-        expect.objectContaining({ url })
-      )
+      [
+        `${mappedOrigin}/`,
+        statusUrl,
+        jsonUrl,
+        contentTypeUrl,
+        pathUrl,
+        payloadUrl,
+        authUrl,
+        blockingCancelUrl,
+        blockingRedirectUrl,
+        requestHeadersUrl
+      ].map((url) => expect.objectContaining({ url }))
     ),
     blocking: expect.arrayContaining(
       [statusUrl, jsonUrl, contentTypeUrl, pathUrl, payloadUrl].map((url) =>
@@ -321,7 +381,9 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     registered: expect.arrayContaining([
       ...allLifecycleEventNames,
       'blocking.filterResponseData',
-      'onHeadersReceived.blocking'
+      'onHeadersReceived.blocking',
+      'onBeforeSendHeaders.blocking',
+      'onAuthRequired.blocking'
     ]),
     headerChanges: expect.arrayContaining([
       expect.objectContaining({
@@ -331,9 +393,41 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
       })
     ]),
     registrationErrors: [],
-    events: expect.arrayContaining(
-      expectedLifecycleEvents.map((event) => expect.objectContaining(event))
-    ),
+    blockingDecisions: expect.arrayContaining([
+      expect.objectContaining({ url: blockingCancelUrl, action: 'cancel' }),
+      expect.objectContaining({
+        url: blockingRedirectUrl,
+        action: 'redirect',
+        redirectUrl: redirectTargetUrl
+      }),
+      expect.objectContaining({ url: requestHeadersUrl, action: 'requestHeaders' })
+    ]),
+    events: expect.arrayContaining([
+      ...expectedLifecycleEvents.map((event) => expect.objectContaining(event)),
+      expect.objectContaining({ url: blockingCancelUrl, event: 'onErrorOccurred' }),
+      expect.objectContaining({
+        url: blockingRedirectUrl,
+        event: 'onBeforeRedirect',
+        redirectUrl: redirectTargetUrl
+      }),
+      expect.objectContaining({
+        url: requestHeadersUrl,
+        event: 'onSendHeaders',
+        requestHeaders: expect.arrayContaining([
+          { name: 'x-harness-request', value: 'modified-by-webRequest' }
+        ])
+      }),
+      expect.objectContaining({
+        url: authUrl,
+        event: 'onBeforeSendHeaders',
+        requestHeaders: expect.arrayContaining([
+          {
+            name: 'authorization',
+            value: 'Basic dGVzdC11c2VyOnRlc3QtcGFzcw=='
+          }
+        ])
+      })
+    ]),
     responseHeaders: expect.arrayContaining(
       expectedStatuses.map(([url, statusCode]) => expect.objectContaining({ url, statusCode }))
     ),
@@ -404,6 +498,13 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     url: redirectTargetUrl,
     body: 'redirected'
   })
+  expect(response.blockingRedirected).toEqual({
+    status: 200,
+    url: redirectTargetUrl,
+    body: 'redirected'
+  })
+  expect(response.blockingCancelError).toBeTruthy()
+  expect(response.requestHeadersStatus).toBe(200)
   expect(response.abortError).toBeTruthy()
 
   const observations = await readObservations()
@@ -412,7 +513,14 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     expect(responseHeaders).toBeDefined()
     expect(responseHeaders).toContainEqual({ name, value })
   }
-  expect(response.authStatus === 401 || response.authError !== '').toBe(true)
+  expect(response.authStatus).toBe(200)
+  expect(response.authError).toBe('')
+  expect(response.authBody).toBe('authenticated')
+  expect(
+    authRouteHeaders.some(
+      (headers) => headers.authorization === 'Basic dGVzdC11c2VyOnRlc3QtcGFzcw=='
+    )
+  ).toBe(true)
   const redirectRequest = observations.events.find(
     (event) => event.url === redirectUrl && event.event === 'onBeforeRequest'
   )
@@ -455,6 +563,15 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     ).toHaveLength(1)
   }
 
+  const blockingRedirectRequest = observations.events.find(
+    (event) => event.url === blockingRedirectUrl && event.event === 'onBeforeRequest'
+  )
+  const blockingRedirectEvent = observations.events.find(
+    (event) => event.url === blockingRedirectUrl && event.event === 'onBeforeRedirect'
+  )
+  expect(blockingRedirectEvent).toMatchObject({ redirectUrl: redirectTargetUrl })
+  expect(blockingRedirectEvent?.requestId).toBe(blockingRedirectRequest?.requestId)
+
   const abortRequest = observations.events.find(
     (event) => event.url === abortUrl && event.event === 'onBeforeRequest'
   )
@@ -470,6 +587,34 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
       (event) => event.url === abortUrl && event.event === 'onErrorOccurred'
     )
   ).toHaveLength(1)
+
+  const blockingCancelRequest = observations.events.find(
+    (event) => event.url === blockingCancelUrl && event.event === 'onBeforeRequest'
+  )
+  const blockingCancelEvent = observations.events.find(
+    (event) => event.url === blockingCancelUrl && event.event === 'onErrorOccurred'
+  )
+  expect(blockingCancelEvent).toBeDefined()
+  expect(blockingCancelEvent?.requestId).toBe(blockingCancelRequest?.requestId)
+  for (const eventName of ['onHeadersReceived', 'onResponseStarted', 'onCompleted']) {
+    expect(
+      observations.events.filter(
+        (event) => event.url === blockingCancelUrl && event.event === eventName
+      )
+    ).toHaveLength(0)
+  }
+
+  const headerEvents = observations.events.filter((event) => event.url === requestHeadersUrl)
+  const beforeSendHeaders = headerEvents.find((event) => event.event === 'onBeforeSendHeaders')
+  const sendHeaders = headerEvents.find((event) => event.event === 'onSendHeaders')
+  expect(beforeSendHeaders?.requestHeaders).toContainEqual({
+    name: 'x-harness-request',
+    value: 'original'
+  })
+  expect(sendHeaders?.requestHeaders).toContainEqual({
+    name: 'x-harness-request',
+    value: 'modified-by-webRequest'
+  })
 
   const authRequest = observations.events.find(
     (event) => event.url === authUrl && event.event === 'onBeforeRequest'
@@ -540,6 +685,50 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
       value: 'changed'
     })
   }
+})
+test('onSendHeaders sees request headers changed by blocking listeners', async ({
+  page,
+  extensions
+}) => {
+  const extension = extensions.values().next().value
+  if (!extension?.background) throw new Error('The webRequest fixture must have a background page')
+  const background = extension.background
+
+  await page.route(requestHeadersUrl, (route) =>
+    route.fulfill({ status: 200, body: 'request headers' })
+  )
+  await page.goto(`${mappedOrigin}/`)
+  await expect(page.locator('body')).toHaveAttribute('data-fixture', 'local-mappings-web-request')
+  const response = await page.evaluate(async () => {
+    const result = await fetch('/request-headers', {
+      cache: 'no-store',
+      headers: { 'x-harness-request': 'original' }
+    })
+    return { status: result.status, body: await result.text() }
+  })
+  expect(response).toEqual({ status: 200, body: 'request headers' })
+
+  const readRequestHeaderEvents = () =>
+    background.evaluate(() => {
+      const observations = (
+        globalThis as unknown as { localMappingsWebRequestObservations: WebRequestObservations }
+      ).localMappingsWebRequestObservations
+      return observations.events.filter(
+        (event) => event.url === 'https://web-request.localhost/request-headers'
+      )
+    })
+  await expect
+    .poll(async () => {
+      const events = await readRequestHeaderEvents()
+      const before = events.find((event) => event.event === 'onBeforeSendHeaders')
+      const sent = events.find((event) => event.event === 'onSendHeaders')
+      return {
+        before: before?.requestHeaders?.find((header) => header.name === 'x-harness-request')
+          ?.value,
+        after: sent?.requestHeaders?.find((header) => header.name === 'x-harness-request')?.value
+      }
+    })
+    .toEqual({ before: 'original', after: 'modified-by-webRequest' })
 })
 
 const testWithoutWebRequest = createFirefoxFixtures(baseTest, {
