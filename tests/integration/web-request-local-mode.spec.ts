@@ -586,6 +586,12 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     )
   ).toHaveLength(0)
 
+  const redirectTargetCompletions = observations.events.filter(
+    (event) => event.url === redirectTargetUrl && event.event === 'onCompleted'
+  )
+  expect(redirectTargetCompletions).toHaveLength(2)
+  expect(new Set(redirectTargetCompletions.map((event) => event.requestId)).size).toBe(2)
+  expect(redirectTargetCompletions.every((event) => event.statusCode === 200)).toBe(true)
   const abortRequest = observations.events.find(
     (event) => event.url === abortUrl && event.event === 'onBeforeRequest'
   )

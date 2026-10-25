@@ -472,7 +472,7 @@ diff --git a/omni.ja/modules/WebRequest.sys.mjs b/omni.ja/modules/WebRequest.sys
 +    if (syntheticResult && Object.keys(syntheticResult).length) {
 +      return syntheticResult;
 +    }
-@@ -1188,4 +1434,17 @@
+@@ -1188,4 +1434,18 @@
 -    if (this.hasRedirects) {
 -      this.runChannelListener(channel, "onBeforeRedirect", {
 -        redirectUrl: newChannel.originalURI.spec,
@@ -494,9 +494,10 @@ diff --git a/omni.ja/modules/WebRequest.sys.mjs b/omni.ja/modules/WebRequest.sys
 +    }
 +    if (this.hasRedirects && !isInternalRedirect) {
 +      this.runChannelListener(channel, "onBeforeRedirect", extraData);
-@@ -1195,0 +1453 @@
++    channel._jugglerSyntheticLifecycle = false;
+@@ -1195,0 +1454 @@
 +
-@@ -1258,0 +1517,11 @@
+@@ -1258,0 +1518,11 @@
 +  updateJugglerRequestHeaders: (channel, headers) => {
 +    const nativeKey = `native:${String(
 +      channel.QueryInterface(Ci.nsIIdentChannel).channelId
