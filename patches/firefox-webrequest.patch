@@ -531,7 +531,7 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 @@ -209 +214 @@
 -  fulfill(status, statusText, headers, base64body) {
 +  async fulfill(status, statusText, headers, base64body) {
-@@ -210,0 +216,104 @@
+@@ -210,0 +216,114 @@
 +    const responseDetails = {
 +      statusCode: status,
 +      statusLine: `HTTP/1.1 ${status} ${statusText}`,
@@ -590,19 +590,29 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +          });
 +          if (await this._handleWebRequestDecision(authResult, true)) return;
 +          const credentials = authResult?.authCredentials;
++          const credentialsText = `${credentials?.username ?? ''}:${credentials?.password ?? ''}`;
++          const utf8Challenge = authHeader.value
++            .slice(challenge[1].length)
++            .split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)
++            .some(parameter => /^\s*charset\s*=\s*"?UTF-8"?\s*$/i.test(parameter));
++          const credentialsAreLatin1 = Array.from(credentialsText).every(
++            character => character.codePointAt(0) <= 0xff
++          );
 +          if (
 +            !isProxy && !this._webRequestAuthRetry &&
 +            challenge?.[1]?.toLowerCase() === 'basic' &&
 +            typeof credentials?.username === 'string' &&
-+            typeof credentials.password === 'string'
++            typeof credentials.password === 'string' && (utf8Challenge || credentialsAreLatin1)
 +          ) {
-+            const authorizationHeaderName = 'Authorization';
-+            const encodedCredentials = btoa(
-+              `${credentials.username}:${credentials.password}`
-+            );
++            const credentialBytes = utf8Challenge
++              ? new TextEncoder().encode(credentialsText)
++              : Array.from(credentialsText, character => character.charCodeAt(0));
++            let binaryCredentials = '';
++            for (const byte of credentialBytes)
++              binaryCredentials += String.fromCharCode(byte);
 +            const authorizationHeader = {
-+              name: authorizationHeaderName,
-+              value: `Basic ${encodedCredentials}`
++              name: 'Authorization',
++              value: `Basic ${btoa(binaryCredentials)}`
 +            };
 +            this._fulfilledResponseDetails = undefined;
 +            this.httpChannel.setRequestHeader(
@@ -636,7 +646,7 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +        }
 +      }
 +    }
-@@ -226,0 +336,52 @@
+@@ -226,0 +346,52 @@
 +
 +  async _dispatchWebRequestEvent(kind, extraData = null) {
 +    const { ExtensionParent } = ChromeUtils.importESModule(
@@ -689,25 +699,25 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +    }
 +    return false;
 +  }
-@@ -417,0 +579,4 @@
+@@ -417,0 +589,4 @@
 +    if (this._fulfilledResponseDetails)
 +      void this._dispatchWebRequestEvent('onResponseStarted', {
 +        syntheticResponse: this._fulfilledResponseDetails
 +      }).catch(error => Cu.reportError(error));
-@@ -445,0 +611,5 @@
+@@ -445,0 +621,5 @@
 +      if (this._fulfilledResponseDetails) {
 +        void this._dispatchWebRequestEvent('onCompleted', {
 +          syntheticResponse: this._fulfilledResponseDetails
 +        }).catch(error => Cu.reportError(error));
 +      }
-@@ -447,0 +618,6 @@
+@@ -447,0 +628,6 @@
 +      if (this._fulfilledResponseDetails) {
 +        void this._dispatchWebRequestEvent('onErrorOccurred', {
 +          syntheticResponse: this._fulfilledResponseDetails,
 +          error: helper.getNetworkErrorStatusText(aStatusCode)
 +        }).catch(error => Cu.reportError(error));
 +      }
-@@ -601,5 +777,7 @@
+@@ -601,5 +787,7 @@
 -    // Undefined |responseEndTime| means there has been no response yet.
 -    // This happens when request interception API is used to redirect
 -    // the request to a different URL.
@@ -720,7 +730,7 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +      pageNetwork &&
 +      (this.httpChannel.responseEndTime !== undefined || hasSyntheticResponse)
 +    ) {
-@@ -689,2 +869,8 @@
+@@ -689,2 +879,8 @@
 -      if (request)
 -        request._onInternalRedirect(newHttpChannel);
 +      if (request) {
@@ -731,7 +741,7 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +          request._onInternalRedirect(newHttpChannel);
 +        }
 +      }
-@@ -700,2 +886,5 @@
+@@ -700,2 +896,5 @@
 -      if (request)
 -        this._expectRedirect(newHttpChannel.channelId + '', request);
 +      if (request) {

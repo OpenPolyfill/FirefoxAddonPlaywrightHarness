@@ -13,6 +13,8 @@ const redirectUrl = `${mappedOrigin}/redirect`
 const redirectTargetUrl = `${mappedOrigin}/redirect-target`
 const abortUrl = `${mappedOrigin}/abort`
 const authUrl = `${mappedOrigin}/auth`
+const utf8AuthUrl = `${mappedOrigin}/utf8-auth`
+const latin1AuthUrl = `${mappedOrigin}/latin1-auth`
 const origin407Url = `${mappedOrigin}/origin-407`
 const blockingCancelUrl = `${mappedOrigin}/blocking-cancel`
 const blockingRedirectUrl = `${mappedOrigin}/blocking-redirect`
@@ -706,6 +708,70 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     })
   }
 })
+test('route.fulfill honors the Basic UTF-8 charset and rejects non-Latin1 default encoding', async ({
+  page,
+  extensions
+}) => {
+  const extension = extensions.values().next().value
+  if (!extension?.background) throw new Error('The webRequest fixture must have a background page')
+
+  await extension.background.evaluate(
+    `browser.webRequest.onAuthRequired.addListener(
+      () => ({
+        authCredentials: { username: 'user\\u0100', password: 'pass\\u0101' }
+      }),
+      { urls: ['${utf8AuthUrl}', '${latin1AuthUrl}'] },
+      ['blocking']
+    )`
+  )
+
+  const expectedAuthorization = 'Basic dXNlcsSAOnBhc3PEgQ=='
+  const utf8RouteAuthorizations: (string | undefined)[] = []
+  const latin1RouteAuthorizations: (string | undefined)[] = []
+  await page.route(utf8AuthUrl, (route) => {
+    const authorization = route.request().headers().authorization
+    utf8RouteAuthorizations.push(authorization)
+    if (authorization === expectedAuthorization)
+      return route.fulfill({ status: 200, body: 'utf8 authenticated' })
+    return route.fulfill({
+      status: 401,
+      headers: { 'www-authenticate': 'Basic realm="utf8", charset="UTF-8"' },
+      body: 'utf8 challenge'
+    })
+  })
+  await page.route(latin1AuthUrl, (route) => {
+    latin1RouteAuthorizations.push(route.request().headers().authorization)
+    return route.fulfill({
+      status: 401,
+      headers: { 'www-authenticate': 'Basic realm="charset=UTF-8"' },
+      body: 'legacy challenge'
+    })
+  })
+
+  await page.goto(`${mappedOrigin}/`)
+  await expect(page.locator('body')).toHaveAttribute('data-fixture', 'local-mappings-web-request')
+  const result = await page.evaluate(async () => {
+    const utf8Response = await fetch('/utf8-auth', { cache: 'no-store' })
+    const utf8 = { status: utf8Response.status, body: await utf8Response.text() }
+    try {
+      const legacyResponse = await fetch('/latin1-auth', { cache: 'no-store' })
+      return {
+        utf8,
+        legacy: { status: legacyResponse.status, error: '' }
+      }
+    } catch (error) {
+      return {
+        utf8,
+        legacy: { status: 0, error: String(error) }
+      }
+    }
+  })
+  expect(result.utf8).toEqual({ status: 200, body: 'utf8 authenticated' })
+  expect(utf8RouteAuthorizations).toEqual([undefined, expectedAuthorization])
+  expect(latin1RouteAuthorizations).toEqual([undefined])
+  expect(result.legacy.status === 401 || !!result.legacy.error).toBe(true)
+})
+
 test('route.fulfill does not replay credentials for non-Basic challenges', async ({
   page,
   extensions
