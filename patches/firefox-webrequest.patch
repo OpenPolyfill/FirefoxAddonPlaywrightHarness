@@ -530,7 +530,7 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 @@ -209 +214 @@
 -  fulfill(status, statusText, headers, base64body) {
 +  async fulfill(status, statusText, headers, base64body) {
-@@ -210,0 +216,100 @@
+@@ -210,0 +216,101 @@
 +    const responseDetails = {
 +      statusCode: status,
 +      statusLine: `HTTP/1.1 ${status} ${statusText}`,
@@ -553,6 +553,7 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +      ...responseDetails,
 +      responseHeaders: headers
 +    };
++    this._fulfilledRedirectResponse = status >= 300 && status < 400;
 +    if (status === 401 || status === 407) {
 +      const isProxy = status === 407;
 +      let proxyInfo;
@@ -586,12 +587,12 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +          if (await this._handleWebRequestDecision(authResult, true)) return;
 +          const credentials = authResult?.authCredentials;
 +          if (
-+            !this._webRequestAuthRetry &&
++            !isProxy && !this._webRequestAuthRetry &&
 +            challenge?.[1]?.toLowerCase() === 'basic' &&
 +            typeof credentials?.username === 'string' &&
 +            typeof credentials.password === 'string'
 +          ) {
-+            const authorizationHeaderName = isProxy ? 'Proxy-Authorization' : 'Authorization';
++            const authorizationHeaderName = 'Authorization';
 +            const encodedCredentials = btoa(
 +              `${credentials.username}:${credentials.password}`
 +            );
@@ -631,7 +632,7 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +        }
 +      }
 +    }
-@@ -226,0 +332,51 @@
+@@ -226,0 +333,52 @@
 +
 +  async _dispatchWebRequestEvent(kind, extraData = null) {
 +    const { ExtensionParent } = ChromeUtils.importESModule(
@@ -668,6 +669,7 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +    if (result?.redirectUrl) {
 +      if (syntheticResponse) {
 +        this._fulfilledResponseDetails = undefined;
++        this._fulfilledRedirectResponse = true;
 +        this._interceptedChannel.synthesizeStatus(302, 'Found');
 +        this._interceptedChannel.synthesizeHeader('Location', result.redirectUrl);
 +        const synthesized = Cc["@mozilla.org/io/string-input-stream;1"].createInstance(
@@ -683,23 +685,55 @@ diff --git a/omni.ja/chrome/juggler/content/NetworkObserver.js b/omni.ja/chrome/
 +    }
 +    return false;
 +  }
-@@ -417,0 +574,4 @@
+@@ -417,0 +576,4 @@
 +    if (this._fulfilledResponseDetails)
 +      void this._dispatchWebRequestEvent('onResponseStarted', {
 +        syntheticResponse: this._fulfilledResponseDetails
 +      }).catch(error => Cu.reportError(error));
-@@ -445,0 +606,5 @@
+@@ -445,0 +608,5 @@
 +      if (this._fulfilledResponseDetails) {
 +        void this._dispatchWebRequestEvent('onCompleted', {
 +          syntheticResponse: this._fulfilledResponseDetails
 +        }).catch(error => Cu.reportError(error));
 +      }
-@@ -447,0 +613,6 @@
+@@ -447,0 +615,6 @@
 +      if (this._fulfilledResponseDetails) {
 +        void this._dispatchWebRequestEvent('onErrorOccurred', {
 +          syntheticResponse: this._fulfilledResponseDetails,
 +          error: helper.getNetworkErrorStatusText(aStatusCode)
 +        }).catch(error => Cu.reportError(error));
++      }
+@@ -601,5 +774,7 @@
+-    // Undefined |responseEndTime| means there has been no response yet.
+-    // This happens when request interception API is used to redirect
+-    // the request to a different URL.
+-    // In this case, we should not emit "requestFinished" event.
+-    if (pageNetwork && this.httpChannel.responseEndTime !== undefined) {
++    // Synthetic responses may lack responseEndTime; still finish them.
++    const hasSyntheticResponse =
++      this._fulfilledResponseDetails || this._fulfilledRedirectResponse;
++    if (
++      pageNetwork &&
++      (this.httpChannel.responseEndTime !== undefined || hasSyntheticResponse)
++    ) {
+@@ -689,2 +866,8 @@
+-      if (request)
+-        request._onInternalRedirect(newHttpChannel);
++      if (request) {
++        if (request._fulfilledRedirectResponse) {
++          request._sendOnResponse(false);
++          this._expectRedirect(newHttpChannel.channelId + '', request);
++        } else {
++          request._onInternalRedirect(newHttpChannel);
++        }
++      }
+@@ -700,2 +883,5 @@
+-      if (request)
+-        this._expectRedirect(newHttpChannel.channelId + '', request);
++      if (request) {
++        if (request._fulfilledRedirectResponse)
++          request._sendOnResponse(false);
++        this._expectRedirect(newHttpChannel.channelId + '', request);
 +      }
 diff --git a/omni.ja/chrome/juggler/content/protocol/PageHandler.js b/omni.ja/chrome/juggler/content/protocol/PageHandler.js
 --- a/omni.ja/chrome/juggler/content/protocol/PageHandler.js

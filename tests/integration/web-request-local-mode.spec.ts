@@ -296,6 +296,7 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     }
   })
 
+  await page.waitForLoadState('networkidle')
   expect(authRouteHeaders).toHaveLength(2)
   expect(authRouteHeaders[1]).toMatchObject({
     authorization: 'Basic dGVzdC11c2VyOnRlc3QtcGFzc3dvcmQ='
@@ -520,6 +521,11 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
   expect(response.authStatus).toBe(200)
   expect(response.authError).toBe('')
   expect(response.authBody).toBe('authenticated')
+  expect(
+    observations.events.filter(
+      (event) => event.url === origin407Url && event.event === 'onAuthRequired'
+    )
+  ).toHaveLength(0)
   const redirectRequest = observations.events.find(
     (event) => event.url === redirectUrl && event.event === 'onBeforeRequest'
   )
@@ -685,6 +691,51 @@ test('localMappings and route.fulfill response fields are visible to webRequest'
     })
   }
 })
+test('route.fulfill does not replay credentials for non-Basic challenges', async ({
+  page,
+  extensions
+}) => {
+  const extension = extensions.values().next().value
+  if (!extension?.background) throw new Error('The webRequest fixture must have a background page')
+  const background = extension.background
+  const routeAuthorizations: (string | undefined)[] = []
+
+  await page.route(authUrl, (route) => {
+    routeAuthorizations.push(route.request().headers().authorization)
+    return route.fulfill({
+      status: 401,
+      headers: {
+        'www-authenticate': 'Digest realm="harness", nonce="digest-nonce", qop="auth"'
+      },
+      body: 'digest challenge'
+    })
+  })
+  await page.goto(`${mappedOrigin}/`)
+  await expect(page.locator('body')).toHaveAttribute('data-fixture', 'local-mappings-web-request')
+
+  const result = await page.evaluate(async () => {
+    try {
+      const response = await fetch('/auth', { cache: 'no-store' })
+      return { status: response.status, error: '' }
+    } catch (error) {
+      return { status: 0, error: String(error) }
+    }
+  })
+  expect(routeAuthorizations).toEqual([undefined])
+  expect(result.status === 401 || !!result.error).toBe(true)
+
+  const authEvents = await background.evaluate(() => {
+    const observations = (
+      globalThis as unknown as { localMappingsWebRequestObservations: WebRequestObservations }
+    ).localMappingsWebRequestObservations
+    return observations.events.filter(
+      (event) => event.url.endsWith('/auth') && event.event === 'onAuthRequired'
+    )
+  })
+  expect(authEvents).toHaveLength(1)
+  expect(authEvents[0]).toMatchObject({ scheme: 'digest', realm: 'harness' })
+})
+
 test('onSendHeaders sees request headers changed by blocking listeners', async ({
   page,
   extensions
