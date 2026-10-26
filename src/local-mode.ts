@@ -79,7 +79,8 @@ export async function resolveLocalMappings(
 export async function attachFirefoxLocalMappings(
   context: BrowserContext,
   rdp: FirefoxRDP,
-  mappings: Record<string, string> | undefined
+  mappings: Record<string, string> | undefined,
+  executablePath: string
 ): Promise<FirefoxLocalModeController | undefined> {
   if (!mappings || Object.keys(mappings).length === 0) return undefined
 
@@ -93,7 +94,7 @@ export async function attachFirefoxLocalMappings(
     const existing = registrations.get(page)
     if (existing) return existing.ready
 
-    const ready = setupQueue.then(() => setupPage(page, rdp, mappings))
+    const ready = setupQueue.then(() => setupPage(page, rdp, mappings, executablePath))
     setupQueue = ready.then(
       () => undefined,
       () => undefined
@@ -199,7 +200,8 @@ export async function attachFirefoxLocalMappings(
 async function setupPage(
   page: Page,
   rdp: FirefoxRDP,
-  mappings: Record<string, string>
+  mappings: Record<string, string>,
+  executablePath: string
 ): Promise<LocalModePage> {
   if (page.isClosed()) throw new Error('Cannot configure Firefox Local Mode on a closed page')
 
@@ -212,7 +214,7 @@ async function setupPage(
       `Firefox localMappings require Firefox 153 or newer with DevTools Local Mode; found Firefox ${version}`
     )
   }
-  await assertFirefoxLocalModePatchApplied(version)
+  await assertFirefoxLocalModePatchApplied(version, executablePath)
 
   await page.bringToFront()
   const tab = (await rdp.root.listTabs()).find((candidate) => candidate.selected)

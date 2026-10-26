@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module'
+import { ensureFirefoxInstalled } from './browser-install.js'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFile } from 'node:fs/promises'
@@ -16,12 +17,12 @@ const firefoxPatchPath = join(packageDir, '../patches/firefox.patch')
 const firefoxLocalModePatchPath = join(packageDir, '../patches/firefox-local-mode.patch')
 const firefoxWebRequestPatchPath = join(packageDir, '../patches/firefox-webrequest.patch')
 const playwrightPatchPath = join(packageDir, '../patches/playwright-core.patch')
-let patchPromise: Promise<void> | undefined
-let patchAssertion: Promise<void> | undefined
-let localModePatchAssertion: Promise<void> | undefined
+const patchPromises = new Map<string, Promise<void>>()
+const patchAssertions = new Map<string, Promise<void>>()
+const localModePatchAssertions = new Map<string, Promise<void>>()
 
-function firefoxDirectory(): string {
-  const binDir = dirname(firefox.executablePath())
+function firefoxDirectory(executablePath = firefox.executablePath()): string {
+  const binDir = dirname(executablePath)
   return process.platform === 'darwin' ? join(binDir, '..', 'Resources') : binDir
 }
 
@@ -47,13 +48,15 @@ interface FirefoxPatchTargets {
   zip: JSZip
   sources: Record<string, string>
 }
-async function loadFirefoxLocalModePatchTarget(): Promise<FirefoxLocalModePatchTarget | undefined> {
+async function loadFirefoxLocalModePatchTarget(
+  executablePath: string
+): Promise<FirefoxLocalModePatchTarget | undefined> {
   const patchText = await readFile(firefoxLocalModePatchPath, 'utf8')
   const patchPaths = getPatchPaths(patchText, 'Firefox Local Mode')
   if (!patchPaths.length || patchPaths.some((path) => !path.startsWith('browser/omni.ja/'))) {
     throw new Error('Firefox Local Mode patch must target browser/omni.ja members')
   }
-  const archivePath = join(firefoxDirectory(), 'browser', 'omni.ja')
+  const archivePath = join(firefoxDirectory(executablePath), 'browser', 'omni.ja')
   let zip: JSZip
   try {
     zip = await JSZip.loadAsync(await readFile(archivePath))
@@ -72,8 +75,8 @@ async function loadFirefoxLocalModePatchTarget(): Promise<FirefoxLocalModePatchT
   return { patchText, patchPaths, archivePath, memberPaths, zip, sources }
 }
 
-async function loadFirefoxPatchTargets(): Promise<FirefoxPatchTargets> {
-  const firefoxDir = firefoxDirectory()
+async function loadFirefoxPatchTargets(executablePath: string): Promise<FirefoxPatchTargets> {
+  const firefoxDir = firefoxDirectory(executablePath)
   const omniPath = join(firefoxDir, 'omni.ja')
   const cfgPath = join(firefoxDir, 'playwright.cfg')
   const patchText = await readFile(firefoxPatchPath, 'utf8')
@@ -140,30 +143,37 @@ function applyFirefoxPatchTargets(target: FirefoxPatchTargets): UnifiedPatchResu
   }
 }
 
-async function firefoxPatchState(): Promise<'unpatched' | 'patched'> {
-  const target = await loadFirefoxPatchTargets()
+async function firefoxPatchState(executablePath: string): Promise<'unpatched' | 'patched'> {
+  const target = await loadFirefoxPatchTargets(executablePath)
   return applyFirefoxPatchTargets(target).state
 }
 
 export async function ensureFirefoxPatched(): Promise<void> {
-  patchPromise ??= patchFirefoxInstallation().catch((error: unknown) => {
-    patchPromise = undefined
-    throw error
-  })
-  return patchPromise
+  await ensureFirefoxInstalled({ patchFirefox: true })
 }
-export function assertFirefoxLocalModePatchApplied(version?: string): Promise<void> {
-  localModePatchAssertion ??= verifyFirefoxLocalModePatchApplied(version).catch(
-    (error: unknown) => {
-      localModePatchAssertion = undefined
-      throw error
-    }
-  )
-  return localModePatchAssertion
+export function assertFirefoxLocalModePatchApplied(
+  version?: string,
+  executablePath = firefox.executablePath()
+): Promise<void> {
+  const key = `${executablePath}\0${version ?? ''}`
+  let assertion = localModePatchAssertions.get(key)
+  if (!assertion) {
+    assertion = verifyFirefoxLocalModePatchApplied(version, executablePath).catch(
+      (error: unknown) => {
+        localModePatchAssertions.delete(key)
+        throw error
+      }
+    )
+    localModePatchAssertions.set(key, assertion)
+  }
+  return assertion
 }
 
-async function verifyFirefoxLocalModePatchApplied(version?: string): Promise<void> {
-  const target = await loadFirefoxLocalModePatchTarget()
+async function verifyFirefoxLocalModePatchApplied(
+  version: string | undefined,
+  executablePath: string
+): Promise<void> {
+  const target = await loadFirefoxLocalModePatchTarget(executablePath)
   if (!target) {
     throw new Error(
       `Firefox localMappings requires Firefox 153+ DevTools Local Mode; the Local Mode module is unavailable${version ? ` in Firefox ${version}` : ''}`
@@ -177,15 +187,21 @@ async function verifyFirefoxLocalModePatchApplied(version?: string): Promise<voi
   }
 }
 
-export function assertClosedShadowSelectorPatched(): Promise<void> {
-  patchAssertion ??= verifyPatchesApplied().catch((error: unknown) => {
-    patchAssertion = undefined
-    throw error
-  })
-  return patchAssertion
+export function assertClosedShadowSelectorPatched(
+  executablePath = firefox.executablePath()
+): Promise<void> {
+  let assertion = patchAssertions.get(executablePath)
+  if (!assertion) {
+    assertion = verifyPatchesApplied(executablePath).catch((error: unknown) => {
+      patchAssertions.delete(executablePath)
+      throw error
+    })
+    patchAssertions.set(executablePath, assertion)
+  }
+  return assertion
 }
 
-async function verifyPatchesApplied(): Promise<void> {
+async function verifyPatchesApplied(executablePath: string): Promise<void> {
   const coreBundlePath = playwrightCoreBundlePath()
   const corePatchText = await readFile(playwrightPatchPath, 'utf8')
   const coreSources = { 'lib/coreBundle.js': await readFile(coreBundlePath, 'utf8') }
@@ -196,17 +212,29 @@ async function verifyPatchesApplied(): Promise<void> {
     )
   }
 
-  if ((await firefoxPatchState()) !== 'patched') {
+  if ((await firefoxPatchState(executablePath)) !== 'patched') {
     throw new Error(
       `Playwright Firefox is not patched for extension popup and sidebar Pages. Run the package global setup before the test suite.`
     )
   }
 }
 
-async function patchFirefoxInstallation(): Promise<void> {
-  const target = await loadFirefoxPatchTargets()
+export async function applyFirefoxPatchesForExecutable(executablePath: string): Promise<void> {
+  let patch = patchPromises.get(executablePath)
+  if (!patch) {
+    patch = patchFirefoxInstallation(executablePath).catch((error: unknown) => {
+      patchPromises.delete(executablePath)
+      throw error
+    })
+    patchPromises.set(executablePath, patch)
+  }
+  return patch
+}
+
+async function patchFirefoxInstallation(executablePath: string): Promise<void> {
+  const target = await loadFirefoxPatchTargets(executablePath)
   const result = applyFirefoxPatchTargets(target)
-  const localModeTarget = await loadFirefoxLocalModePatchTarget()
+  const localModeTarget = await loadFirefoxLocalModePatchTarget(executablePath)
   const localModeResult = localModeTarget
     ? applyUnifiedPatchSet(localModeTarget.sources, localModeTarget.patchText, 'Firefox Local Mode')
     : undefined

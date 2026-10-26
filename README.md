@@ -27,14 +27,14 @@ Install the package and its Firefox RDP dependency from the public npm registry:
 
 ```sh
 npm install @openpolyfill/firefox-addon-playwright-harness @playwright/test
-npx playwright install firefox
 ```
 
 Requirements:
 
 - Node.js 20 or newer.
 - `@playwright/test` 1.40 or newer.
-- The Firefox browser installed by Playwright.
+
+The harness automatically installs the Firefox revision required by Playwright on first use, applies its Firefox patches, and reuses the OpenPolyfill browser cache. Set `OPENPOLYFILL_BROWSERS_PATH` to an absolute or relative cache path to customize it; `0` selects Playwright's package-local browser cache convention.
 
 ## Setup
 

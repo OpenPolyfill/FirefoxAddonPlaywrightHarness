@@ -1,10 +1,11 @@
 import { firefox, type BrowserContext, type Frame, type Page } from '@playwright/test'
+import { ensureFirefoxInstalled } from './browser-install.js'
 import { mkdtemp } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { acquireRdpPort } from './port.js'
 import { trackTempDir, removeTempDir, bounded } from './cleanup.js'
-import { ensureFirefoxPatched, assertClosedShadowSelectorPatched } from './patch.js'
+import { assertClosedShadowSelectorPatched } from './patch.js'
 import { FirefoxRdpSession, RdpEvaluation, type InstalledExtension } from './rdp.js'
 import { FirefoxErrorDiagnostics } from './diagnostics.js'
 import { readExtensionManifest } from './extension-package.js'
@@ -41,7 +42,11 @@ const requiredPrefs: Record<string, boolean | number> = {
 
 type LaunchOptions = Parameters<typeof firefox.launchPersistentContext>[1]
 
-function launchOptions(config: FirefoxHarnessConfig, port: number): LaunchOptions {
+function launchOptions(
+  config: FirefoxHarnessConfig,
+  port: number,
+  executablePath: string
+): LaunchOptions {
   const userOptions = config.launchOptions ?? {}
   const suppliedPrefs =
     typeof userOptions.firefoxUserPrefs === 'object' && userOptions.firefoxUserPrefs
@@ -55,7 +60,7 @@ function launchOptions(config: FirefoxHarnessConfig, port: number): LaunchOption
     headless: config.headless,
     firefoxUserPrefs: { ...suppliedPrefs, ...config.firefoxUserPrefs, ...requiredPrefs },
     args: [...suppliedArgs, ...(config.args ?? []), `-start-debugger-server=${port}`],
-    executablePath: firefox.executablePath()
+    executablePath
   } as LaunchOptions
 }
 function objectRecord(value: unknown): Record<string, unknown> | undefined {
@@ -99,11 +104,13 @@ export async function launchFirefoxExtension(
       userDataDir,
       config.nativeMessagingHosts
     )
-    if (config.patchFirefox !== false) await ensureFirefoxPatched()
-    await assertClosedShadowSelectorPatched()
+    const executablePath = await ensureFirefoxInstalled({
+      patchFirefox: config.patchFirefox !== false
+    })
+    await assertClosedShadowSelectorPatched(executablePath)
     context = await firefox.launchPersistentContext(
       userDataDir,
-      launchOptions(config, releasePort.port)
+      launchOptions(config, releasePort.port, executablePath)
     )
     context.once('close', () => {
       void nativeMessaging?.close()
@@ -128,7 +135,12 @@ export async function launchFirefoxExtension(
     }
     extensions = new FirefoxExtensionCollection(session, context, diagnostics)
     for (const extensionPath of extensionPaths) await extensions.install(extensionPath)
-    localMode = await attachFirefoxLocalMappings(context, session.rdp, localMappings)
+    localMode = await attachFirefoxLocalMappings(
+      context,
+      session.rdp,
+      localMappings,
+      executablePath
+    )
 
     return {
       context,
