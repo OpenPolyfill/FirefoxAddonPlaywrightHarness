@@ -772,7 +772,7 @@ test('route.fulfill honors the Basic UTF-8 charset and rejects non-Latin1 defaul
   expect(result.legacy.status === 401 || !!result.legacy.error).toBe(true)
 })
 
-test('route.fulfill does not replay credentials for non-Basic challenges', async ({
+test('route.fulfill avoids replay for non-Basic and unparsable challenges', async ({
   page,
   extensions
 }) => {
@@ -780,6 +780,8 @@ test('route.fulfill does not replay credentials for non-Basic challenges', async
   if (!extension?.background) throw new Error('The webRequest fixture must have a background page')
   const background = extension.background
   const routeAuthorizations: (string | undefined)[] = []
+  const emptyAuthUrl = `${mappedOrigin}/empty-auth`
+  const emptyRouteAuthorizations: (string | undefined)[] = []
 
   await page.route(authUrl, (route) => {
     routeAuthorizations.push(route.request().headers().authorization)
@@ -789,6 +791,14 @@ test('route.fulfill does not replay credentials for non-Basic challenges', async
         'www-authenticate': 'Digest realm="harness", nonce="digest-nonce", qop="auth"'
       },
       body: 'digest challenge'
+    })
+  })
+  await page.route(emptyAuthUrl, (route) => {
+    emptyRouteAuthorizations.push(route.request().headers().authorization)
+    return route.fulfill({
+      status: 401,
+      headers: { 'www-authenticate': '' },
+      body: 'empty challenge'
     })
   })
   await page.goto(`${mappedOrigin}/`)
@@ -815,6 +825,23 @@ test('route.fulfill does not replay credentials for non-Basic challenges', async
   })
   expect(authEvents).toHaveLength(1)
   expect(authEvents[0]).toMatchObject({ scheme: 'digest', realm: 'harness' })
+  const emptyResult = await page.evaluate(async () => {
+    const response = await fetch('/empty-auth', { cache: 'no-store' })
+    return { status: response.status }
+  })
+  expect(emptyResult).toEqual({ status: 401 })
+  expect(emptyRouteAuthorizations).toEqual([undefined])
+
+  const emptyAuthEvents = await background.evaluate(() => {
+    const observations = (
+      globalThis as unknown as { localMappingsWebRequestObservations: WebRequestObservations }
+    ).localMappingsWebRequestObservations
+    return observations.events.filter(
+      (event) => event.url.endsWith('/empty-auth') && event.event === 'onAuthRequired'
+    )
+  })
+  expect(emptyAuthEvents).toHaveLength(1)
+  expect(emptyAuthEvents[0]?.scheme).toBeUndefined()
 })
 
 test('onSendHeaders sees request headers changed by blocking listeners', async ({
