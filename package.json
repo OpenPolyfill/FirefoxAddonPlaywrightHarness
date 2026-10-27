@@ -37,7 +37,6 @@
   "files": [
     "dist",
     "patches",
-    "scripts/install-firefox.mjs",
     "scripts/patch-closed-shadow-selectors.mjs",
     "scripts/unified-patch.mjs",
     "scripts/unified-patch.d.mts",
