@@ -23,6 +23,7 @@ import { RdpIsolatedNamespace } from './isolated.js'
 
 import type {
   FirefoxExtension,
+  FirefoxExtensionInstallOptions,
   FirefoxExtensions,
   FirefoxHarnessConfig,
   FirefoxIsolatedPage,
@@ -244,8 +245,9 @@ class FirefoxExtensionCollection implements FirefoxExtensions {
     return 'FirefoxExtensions'
   }
 
-  install(path: string): Promise<FirefoxExtension> {
-    const run = this.installQueue.then(() => this.installOne(resolve(path)))
+  install(path: string, options: FirefoxExtensionInstallOptions = {}): Promise<FirefoxExtension> {
+    const temporary = options.temporary ?? true
+    const run = this.installQueue.then(() => this.installOne(resolve(path), temporary))
     this.installQueue = run.then(
       () => undefined,
       () => undefined
@@ -265,25 +267,30 @@ class FirefoxExtensionCollection implements FirefoxExtensions {
     this.isolatedPage = undefined
   }
 
-  private async installOne(path: string): Promise<FirefoxExtension> {
+  private async installOne(path: string, temporary: boolean): Promise<FirefoxExtension> {
     const samePathHandle = [...this.handles.values()].find(
       (extension) => extension.installPath === path
     )
-    if (samePathHandle) return samePathHandle.replaceFromPath(path)
+    if (samePathHandle) return samePathHandle.replaceFromPath(path, temporary)
     const declaredId = manifestGeckoId(await readExtensionManifest(path))
     const declaredHandle = declaredId ? this.handles.get(declaredId) : undefined
-    if (declaredHandle) return declaredHandle.replaceFromPath(path)
+    if (declaredHandle) return declaredHandle.replaceFromPath(path, temporary)
 
     let registeredId: string | undefined
     let existingHandle: FirefoxExtensionHandle | undefined
     let installed: InstalledExtension
     try {
-      installed = await this.session.installExtension(path, (extensionId) => {
-        registeredId = extensionId
-        this.diagnostics.addExtensionId(extensionId)
-        existingHandle = this.handles.get(extensionId)
-        return existingHandle !== undefined
-      })
+      installed = await this.session.installExtension(
+        path,
+        (extensionId) => {
+          registeredId = extensionId
+          this.diagnostics.addExtensionId(extensionId)
+          existingHandle = this.handles.get(extensionId)
+          return existingHandle !== undefined
+        },
+        false,
+        temporary
+      )
     } catch (error) {
       if (registeredId && !existingHandle) this.diagnostics.removeExtensionId(registeredId)
       throw error
@@ -384,14 +391,14 @@ class FirefoxExtensionHandle implements FirefoxExtension {
     )
     return run
   }
-  replaceFromPath(path: string): Promise<FirefoxExtension> {
+  replaceFromPath(path: string, temporary = true): Promise<FirefoxExtension> {
     return this.enqueueLifecycle(async () => {
       this.assertInstalled()
       const previousPath = this.installPath
       const previousManifest = this.manifest
       await this.prepareLifecycleChange()
       try {
-        const installed = await this.session.installExtension(path, undefined, true)
+        const installed = await this.session.installExtension(path, undefined, true, temporary)
         if (installed.id !== this.id) {
           await this.session.uninstallAddon(installed.id).catch(() => undefined)
           throw new Error(`Firefox installed ${installed.id} while replacing extension ${this.id}`)

@@ -14,7 +14,7 @@ See [Generated API](/docs/api/reference) for TypeDoc pages generated from `src/i
 - `chromePages()` and `getFirefoxChromePages(context)` — discover the currently open browser chrome Pages.
 - `extensions` — read-only Map-like collection of installed handles keyed by Gecko extension ID.
 - `extensions.get(id)` / `extensions.has(id)` — select an installed extension or check membership.
-- `extensions.install(path)` — install a directory or XPI at runtime.
+- `extensions.install(path, options?)` — temporary by default; `{ temporary: false }` installs only a signed XPI with a Gecko ID into Firefox's profile.
 - `FirefoxExtension.reload()`, `enable()`, `disable()`, and `uninstall()` — control one extension lifecycle.
 - A selected handle's `background`, `isolated`, `isolatedContexts.get(page)`, `activateAction(page, kind)`, and `activateSidebar(page)` — evaluate or activate extension contexts and UI.
 - `rdp.root.listTabs()` — access the raw `FirefoxRDP` client from a test.

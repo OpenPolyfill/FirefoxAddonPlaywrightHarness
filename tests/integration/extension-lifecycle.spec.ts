@@ -189,16 +189,42 @@ test('replaces the same Gecko ID from a directory and XPI while preserving its h
   }
 })
 
-test('installs and uninstalls directories and XPI files at runtime', async ({ extensions }) => {
-  const unpacked = await extensions.install(unpackedExtension)
-  expect(extensions.has(unpacked.id)).toBe(true)
-  await unpacked.uninstall()
-  expect(extensions.has(unpacked.id)).toBe(false)
+test('profile installs require a signed Gecko XPI; temporary installs stay available', async ({
+  extensions
+}) => {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), 'firefox-profile-install-'))
+  const profileExtensionId = 'profile-install@example.org'
+  const unsignedXpiPath = join(temporaryDirectory, 'unsigned-with-id.xpi')
+  try {
+    await expect(extensions.install(unpackedExtension, { temporary: false })).rejects.toThrow(
+      /requires a signed XPI file/
+    )
+    await expect(extensions.install(packedExtension, { temporary: false })).rejects.toThrow(
+      /requires a Gecko ID/
+    )
 
-  const packed = await extensions.install(packedExtension)
-  expect(extensions.has(packed.id)).toBe(true)
-  await packed.uninstall()
-  expect(extensions.has(packed.id)).toBe(false)
+    const archive = await JSZip.loadAsync(await readFile(packedExtension))
+    const manifestFile = archive.file('manifest.json')
+    if (!manifestFile) throw new Error('The test XPI has no manifest.json')
+    const manifest = JSON.parse(await manifestFile.async('string')) as Record<string, unknown>
+    manifest.browser_specific_settings = { gecko: { id: profileExtensionId } }
+    archive.file('manifest.json', JSON.stringify(manifest, null, 2))
+    await writeFile(unsignedXpiPath, await archive.generateAsync({ type: 'nodebuffer' }))
+
+    await expect(extensions.install(unsignedXpiPath, { temporary: false })).rejects.toThrow(
+      /signed XPI/
+    )
+    expect(extensions.has(profileExtensionId)).toBe(false)
+
+    const temporary = await extensions.install(packedExtension)
+    expect(extensions.has(temporary.id)).toBe(true)
+    await temporary.uninstall()
+    expect(extensions.has(temporary.id)).toBe(false)
+  } finally {
+    const extension = extensions.get(profileExtensionId)
+    if (extension) await extension.uninstall().catch(() => undefined)
+    await rm(temporaryDirectory, { recursive: true, force: true })
+  }
 })
 
 test('invalidates sidebar pages when an extension is disabled and uninstalled', async ({

@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises'
 import { ActorFront, FirefoxRDP, TargetFront } from '@openpolyfill/firefox-rdp'
 import { readExtensionManifest } from './extension-package.js'
 
@@ -10,6 +11,13 @@ function record(value: unknown): PacketRecord | undefined {
 function stringField(value: unknown, field: string): string | undefined {
   const item = record(value)?.[field]
   return typeof item === 'string' ? item : undefined
+}
+
+function manifestGeckoId(manifest: Record<string, unknown>): string | undefined {
+  const gecko =
+    record(record(manifest.browser_specific_settings)?.gecko) ??
+    record(record(manifest.applications)?.gecko)
+  return stringField(gecko, 'id')
 }
 
 function actorId(value: unknown): string {
@@ -318,6 +326,68 @@ export class FirefoxRdpSession {
     return installed
   }
 
+  private async installPermanentAddon(path: string): Promise<{ id: string; actor: string }> {
+    const id = await this.installPermanentXpi(path)
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      const installed = (await this.listAddons()).find((item) => item.id === id)
+      if (installed) return installed
+      const { promise, resolve } = Promise.withResolvers<void>()
+      setTimeout(resolve, 50)
+      await promise
+    }
+    throw new Error(`Installed addon ${id} was not listed by Firefox`)
+  }
+
+  private async installPermanentXpi(path: string): Promise<string> {
+    return this.evaluateChrome(`(async () => {
+      const { AddonManager } = ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs')
+      const { FileUtils } = ChromeUtils.importESModule('resource://gre/modules/FileUtils.sys.mjs')
+      const install = await AddonManager.getInstallForFile(new FileUtils.File(${JSON.stringify(path)}))
+      if (!install) throw new Error('Firefox could not create an add-on install from the supplied file')
+      const { promise, resolve, reject } = Promise.withResolvers()
+      let finished = false
+      const finish = (error, addonId) => {
+        if (finished) return
+        finished = true
+        install.removeListener(listener)
+        if (error) reject(error instanceof Error ? error : new Error(String(error)))
+        else resolve(addonId)
+      }
+      const formatInstallError = failedInstall => {
+        if (failedInstall.error === -5) {
+          return new Error('Firefox requires a signed XPI for permanent profile installation. Provide a signed XPI or set temporary: true.')
+        }
+        return new Error('Firefox failed to install or read the add-on: ' + failedInstall.error)
+      }
+      const listener = {
+        onInstallEnded(_install, addon) {
+          if (typeof addon?.id !== 'string') {
+            finish(new Error('Firefox completed the add-on install without returning an id'))
+          } else {
+            finish(undefined, addon.id)
+          }
+        },
+        onInstallFailed(failedInstall) {
+          finish(formatInstallError(failedInstall))
+        },
+        onDownloadFailed(failedInstall) {
+          finish(formatInstallError(failedInstall))
+        },
+        onInstallCancelled() {
+          finish(new Error('Firefox cancelled the add-on installation'))
+        }
+      }
+      install.addListener(listener)
+      try {
+        install.install()
+      } catch (error) {
+        finish(error)
+      }
+      return promise
+    })()`)
+  }
+
   async listAddons(): Promise<Array<{ id: string; actor: string; [key: string]: unknown }>> {
     const response = await this.rdp.root.listAddons()
     const addons = record(response)?.addons
@@ -344,10 +414,23 @@ export class FirefoxRdpSession {
   async installExtension(
     path: string,
     onInstalled?: (extensionId: string) => boolean | void,
-    preserveExistingOnFailure = false
+    preserveExistingOnFailure = false,
+    temporary = true
   ): Promise<InstalledExtension> {
     const manifest = await readExtensionManifest(path)
-    const installed = await this.installTemporaryAddon(path)
+    if (!temporary) {
+      if (!(await stat(path)).isFile())
+        throw new Error(
+          'Permanent Firefox profile installation requires a signed XPI file; unpacked directories can only be installed temporarily'
+        )
+      if (!manifestGeckoId(manifest))
+        throw new Error(
+          'Permanent Firefox profile installation requires a Gecko ID in browser_specific_settings.gecko.id or applications.gecko.id'
+        )
+    }
+    const installed = temporary
+      ? await this.installTemporaryAddon(path)
+      : await this.installPermanentAddon(path)
     let preserveExisting = preserveExistingOnFailure
     try {
       preserveExisting = onInstalled?.(installed.id) === true || preserveExisting
@@ -493,7 +576,22 @@ export class FirefoxRdpSession {
   }
 
   async uninstallAddon(addonId: string): Promise<void> {
-    await this.rdp.actor(this.addonsActor).call('uninstallAddon', { addonId })
+    const temporarilyInstalled = await this.evaluateChrome<boolean>(`(async () => {
+      const { AddonManager } = ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs')
+      const addon = await AddonManager.getAddonByID(${JSON.stringify(addonId)})
+      if (!addon) throw new Error('Firefox add-on is not installed: ' + ${JSON.stringify(addonId)})
+      return addon.temporarilyInstalled === true
+    })()`)
+    if (temporarilyInstalled) {
+      await this.rdp.actor(this.addonsActor).call('uninstallAddon', { addonId })
+    } else {
+      await this.evaluateChrome(`(async () => {
+        const { AddonManager } = ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs')
+        const addon = await AddonManager.getAddonByID(${JSON.stringify(addonId)})
+        if (!addon) throw new Error('Firefox add-on is not installed: ' + ${JSON.stringify(addonId)})
+        await addon.uninstall()
+      })()`)
+    }
     const deadline = Date.now() + 15_000
     while ((await this.listAddons()).some((addon) => addon.id === addonId)) {
       if (Date.now() >= deadline)

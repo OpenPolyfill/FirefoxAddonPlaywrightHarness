@@ -11,7 +11,7 @@ Extensions without a background page or worker install normally; the selected ha
 ## Features
 
 - Isolated Firefox profile per harness instance.
-- Temporary installation of multiple extensions through Firefox RDP from unpacked directories or packed XPIs.
+- Temporary installation of extensions through Firefox RDP by default, with an option to install them into the Firefox profile.
 - Optional background evaluation through each handle's `background` for extensions with background pages or workers.
 - Page-bound isolated evaluation through each handle's `isolated`.
 - Explicit page contexts through each handle's `isolatedContexts.get(page)`.
@@ -141,10 +141,10 @@ The `extensions` fixture exposes the installed extensions as a read-only Map-lik
 
 - `extensions.get(id)!` selects a known extension; `extensions.has(id)` checks collection membership.
 - `extensions.values().next().value!` selects the first extension when its ID is unknown.
-- `extensions.install(path)` installs a directory or XPI at runtime and returns its handle.
-- Each handle exposes `background`, `isolated`, `isolatedContexts.get(page)`, `activateAction(page, kind)`, `waitForPopup()`, `activateSidebar(page)`, `reload()`, `enable()`, `disable()`, `uninstall()`, `id`, and `installPath`.
+- `extensions.install(path)` installs a directory or XPI as a temporary add-on by default. Pass `{ temporary: false }` to use Firefox's profile installer.
+- Profile mode accepts only a signed `.xpi` file whose manifest has a Gecko ID; unpacked directories and unsigned XPIs are rejected. Use the default temporary mode for local development.
 
-Installing another directory or XPI with an ID already in `extensions` follows Firefox's temporary-addon replacement behavior and returns the existing handle; the collection size stays unchanged.
+Installing another directory or XPI with an ID already in `extensions` updates the existing handle using the requested installation mode; the collection size stays unchanged.
 
 - `uninstall()` removes the extension from Firefox and from the collection. `close()` is also available on the handle and uninstalls that extension.
 

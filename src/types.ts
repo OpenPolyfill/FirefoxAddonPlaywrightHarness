@@ -113,10 +113,15 @@ export interface FirefoxExtension {
   close(): Promise<void>
 }
 
+export interface FirefoxExtensionInstallOptions {
+  /** Use Firefox's temporary add-on installation; defaults to true. */
+  temporary?: boolean
+}
+
 /** Read-only Map-like view of installed extensions, keyed by Gecko extension ID. */
 export interface FirefoxExtensions extends ReadonlyMap<string, FirefoxExtension> {
-  /** Install a directory or XPI into the running Firefox instance. */
-  install(path: string): Promise<FirefoxExtension>
+  /** Profile installs accept only signed XPI files with a Gecko ID. */
+  install(path: string, options?: FirefoxExtensionInstallOptions): Promise<FirefoxExtension>
 }
 
 export interface InternalFirefoxContext extends BrowserContext {

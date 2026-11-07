@@ -23,6 +23,7 @@ export type {
   EvaluateOptions,
   FirefoxBackground,
   FirefoxExtension,
+  FirefoxExtensionInstallOptions,
   FirefoxExtensions,
   FirefoxHarnessConfig,
   FirefoxHarnessProjectOptions,

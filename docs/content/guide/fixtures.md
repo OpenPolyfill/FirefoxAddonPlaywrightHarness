@@ -144,9 +144,11 @@ test('manage extension lifecycles', async ({ extensions }) => {
 })
 ```
 
-Use `extensions.has(id)`, `extensions.get(id)`, `values()`, and the other read-only Map methods to inspect membership. `extensions.install(path)` installs an unpacked directory or packed XPI into the running Firefox instance and returns its handle.
+Use `extensions.has(id)`, `extensions.get(id)`, `values()`, and the other read-only Map methods to inspect membership. `extensions.install(path)` installs an unpacked directory or packed XPI into the running Firefox instance as a temporary add-on by default. Pass `{ temporary: false }` to install through Firefox's AddonManager into the profile.
 
-Installing another source with an ID already in `extensions` follows Firefox's native temporary-addon replacement behavior and returns the existing handle without changing collection membership.
+Profile mode accepts only a signed `.xpi` file whose manifest has a Gecko ID; unpacked directories and unsigned XPIs are rejected. Use the default temporary mode for local development.
+
+Installing another source with an ID already in `extensions` updates the existing handle using the requested installation mode without changing collection membership.
 
 Each `FirefoxExtension` handle provides:
 

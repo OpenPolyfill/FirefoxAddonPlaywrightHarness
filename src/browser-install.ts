@@ -186,6 +186,12 @@ async function createPlaywrightRegistry(browsersPath: string): Promise<Playwrigh
     `const envDefined = ${JSON.stringify(browsersPath)};`,
     'browser cache configuration'
   )
+  source = replaceExactlyOnce(
+    source,
+    'logPolitely(`BEWARE: your OS is not officially supported by Playwright; downloading fallback build for ${hostPlatform}.`);',
+    'void 0; // Keep fallback selection, but omit its non-actionable notice.',
+    'unsupported-platform download notice'
+  )
 
   const installerStart = source.indexOf('async function downloadBrowserWithProgressBar(')
   const downloaderStart = source.indexOf(
